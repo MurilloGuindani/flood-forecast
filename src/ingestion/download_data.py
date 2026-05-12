@@ -13,7 +13,7 @@ import requests
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DATA_URL = "https://arquivos.ufsc.br/f/ae782036c81143e5bfd7/?dl=1"
+DATA_URL = "https://arquivos.ufsc.br/f/d5413e85d6004a5c8a71/?dl=1"
 # src/ingestion/download_data.py -> root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BASE_DIR = PROJECT_ROOT / "data"

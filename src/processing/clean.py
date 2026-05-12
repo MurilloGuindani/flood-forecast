@@ -21,6 +21,12 @@ RAW_DIR = BASE_DIR / "raw"
 PROCESSED_DIR = BASE_DIR / "cleaned"
 
 NA_VALUES = ["9999.9", "9999", "9999,9", ""]
+MONTHS_PT = {
+    "Janeiro": 1, "Fevereiro": 2, "Março": 3, "Marco": 3,
+    "Abril": 4, "Maio": 5, "Junho": 6, "Julho": 7,
+    "Agosto": 8, "Setembro": 9, "Outubro": 10,
+    "Novembro": 11, "Dezembro": 12,
+}
 
 COLUMN_MAP = {
     "Codigo":               "station_id",
@@ -150,6 +156,83 @@ def clean(df: pd.DataFrame, meta: StationMeta) -> pd.DataFrame:
     return df
 
 
+def parse_tide_file(filepath: Path, year: int) -> pd.DataFrame:
+    with open(filepath, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    if "BEGIN" in text:
+        text = text.split("BEGIN", 1)[1]
+
+    lines = text.splitlines()
+    records = []
+    current_month = None
+    current_day = None
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        if line in MONTHS_PT:
+            current_month = MONTHS_PT[line]
+            current_day = None
+            i += 1
+            continue
+        if re.fullmatch(r"\d{2}", line) and i + 1 < len(lines):
+            weekday = lines[i + 1].strip()
+            if re.fullmatch(r"[A-ZÇÁÉÍÓÚ]{3}", weekday):
+                current_day = int(line)
+                i += 2
+                continue
+        m = re.fullmatch(r"\s*(\d{2})(\d{2})\s+(-?\d+\.\d+)\s*", line)
+        if m and current_month and current_day:
+            try:
+                dt = pd.Timestamp(year=year, month=current_month,
+                                  day=current_day, hour=int(m.group(1)),
+                                  minute=int(m.group(2)))
+                records.append(
+                    {"datetime": dt, "tide_level_m": float(m.group(3))})
+            except ValueError:
+                pass
+        i += 1
+
+    return (pd.DataFrame(records)
+            .sort_values("datetime")
+            .drop_duplicates(subset="datetime")
+            .reset_index(drop=True))
+
+
+# TODO: convert to cm
+def process_tides() -> None:
+    tide_table_year = {
+        2024: RAW_DIR / "tide_table_2024.txt",
+        2025: RAW_DIR / "tide_table_2025.txt",
+        2026: RAW_DIR / "tide_table_2026.txt",
+    }
+
+    dfs = []
+    for year, filepath in tide_table_year.items():
+        if not filepath.exists():
+            print(f"[warn] tide file not found: {filepath.name}")
+            continue
+        print(f"[tide] parsing {filepath.name}")
+        dfs.append(parse_tide_file(filepath, year))
+
+    if not dfs:
+        print("[warn] no tide files parsed")
+        return
+
+    df = (pd.concat(dfs, ignore_index=True)
+          .drop_duplicates()
+          .sort_values("datetime")
+          .reset_index(drop=True))
+
+    out_path = PROCESSED_DIR / "tide_table.parquet"
+    df.to_parquet(out_path, index=False)
+    print(f"[ok] tide_table.parquet  ({len(df)} rows)")
+
+
 def process_all() -> None:
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -164,15 +247,15 @@ def process_all() -> None:
         try:
             meta, raw_df = load_csv(path)
             df = clean(raw_df, meta)
-
             out_name = f"{meta.station_id}_{slugify(meta.name)}.parquet"
             out_path = PROCESSED_DIR / out_name
             df.to_parquet(out_path, index=False)
-
             print(
                 f"[ok] {path.name} -> {out_name}  ({len(df)} rows, {len(df.columns)} cols)")
         except Exception as e:
             print(f"[error] {path.name}: {e}")
+
+    process_tides()
 
 
 if __name__ == "__main__":
