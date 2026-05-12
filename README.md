@@ -1,7 +1,7 @@
 # flood-forecast
 
-
-# Data
-
-The data comprises metereological information from the Florianópolis region from April 2024 to April 2026. Download at:
-https://arquivos.ufsc.br/f/ae782036c81143e5bfd7/?dl=1
+1. Create a .venv
+2. Install dependencies on `pip install -r requirements.txt`
+3. Run `python3 src/ingestion/download_data.py`
+4. Run `python3 src/processing/clean.py`
+5. Run `python3 src/analysis/eda_report.py`
