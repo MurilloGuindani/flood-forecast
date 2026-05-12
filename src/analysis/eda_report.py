@@ -16,8 +16,11 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
-from scipy.stats import boxcox
+from scipy.stats import boxcox, spearmanr
 from sklearn.preprocessing import PowerTransformer, QuantileTransformer
+import contextily as ctx
+import geopandas as gpd
+from shapely.geometry import Point
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +32,66 @@ STATION_COLS = {"station_name", "station_city", "station_lat",
                 "station_lon", "station_alt_m", "station_id"}
 TIME_COL = "datetime"
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def features_table_page(pdf: PdfPages, station_meta: list[dict], dfs: list[pd.DataFrame]) -> None:
+    # Collect all unique features across stations
+    all_features = sorted({col for df in dfs for col in numeric_cols(df)})
+    station_names = [m["name"] for m in station_meta]
+
+    # Build presence matrix
+    matrix = []
+    for df in dfs:
+        cols = set(numeric_cols(df))
+        matrix.append(["✓" if f in cols else "" for f in all_features])
+
+    fig, ax = plt.subplots(
+        figsize=(max(10, len(all_features) * 1.2), max(4, len(dfs) * 0.5 + 2)))
+    ax.axis("off")
+    ax.set_title("Feature Presence per Station",
+                 fontsize=13, fontweight="bold", pad=12)
+
+    tbl = ax.table(
+        cellText=matrix,
+        rowLabels=station_names,
+        colLabels=all_features,
+        cellLoc="center",
+        loc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8)
+    tbl.scale(1.1, 1.6)
+
+    # Highlight present cells
+    for (row, col), cell in tbl.get_celld().items():
+        if row == 0:
+            cell.set_text_props(rotation=45, ha="left", fontsize=7)
+            cell.set_height(0.1)
+        if row > 0 and col >= 0 and cell.get_text().get_text() == "✓":
+            cell.set_facecolor("#4C72B0")
+            cell.set_text_props(color="white", fontweight="bold")
+
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _mic_matrix(data: pd.DataFrame) -> pd.DataFrame:
+    """Approximate MIC via mutual information from sklearn."""
+    from sklearn.feature_selection import mutual_info_regression
+    cols = data.columns.tolist()
+    n = len(cols)
+    mic = np.zeros((n, n))
+    for i in range(n):
+        mi = mutual_info_regression(
+            data.values, data.iloc[:, i].values, random_state=42)
+        mic[i, :] = mi
+    # Normalise to [0, 1]
+    mic_max = mic.max()
+    if mic_max > 0:
+        mic /= mic_max
+    np.fill_diagonal(mic, 1.0)
+    return pd.DataFrame(mic, index=cols, columns=cols)
 
 
 def numeric_cols(df: pd.DataFrame) -> list[str]:
@@ -318,6 +381,102 @@ def boxplot_page(pdf: PdfPages, df: pd.DataFrame, station_name: str) -> None:
     plt.close(fig)
 
 
+def _build_geodataframe(station_meta: list[dict]):
+    valid = [s for s in station_meta if not (
+        np.isnan(s["lat"]) or np.isnan(s["lon"]))]
+    gdf = gpd.GeoDataFrame(
+        valid,
+        geometry=[Point(s["lon"], s["lat"]) for s in valid],
+        crs="EPSG:4326",
+    ).to_crs(epsg=3857)
+    return gdf
+
+
+def _draw_map(ax, gdf, highlight_idx=None):
+    others = gdf[gdf.index !=
+                 highlight_idx] if highlight_idx is not None else gdf
+    highlight = gdf[gdf.index ==
+                    highlight_idx] if highlight_idx is not None else None
+
+    if not others.empty:
+        others.plot(ax=ax, color="#4C72B0", markersize=40, zorder=3, alpha=0.8)
+    if highlight is not None and not highlight.empty:
+        highlight.plot(ax=ax, color="red", markersize=80, marker="*", zorder=4)
+
+    for _, row in gdf.iterrows():
+        ax.annotate(row["name"], xy=(row.geometry.x, row.geometry.y),
+                    xytext=(4, 4), textcoords="offset points", fontsize=6,
+                    bbox=dict(boxstyle="round,pad=0.1", fc="white", alpha=0.5, lw=0))
+    try:
+        ctx.add_basemap(
+            ax, source=ctx.providers.OpenStreetMap.Mapnik, zoom=9)
+    except Exception:
+        ax.set_facecolor("#cde")
+    ax.set_axis_off()
+
+
+def correlation_page(pdf: PdfPages, df: pd.DataFrame, station_name: str) -> None:
+
+    cols = numeric_cols(df)
+    if len(cols) < 2:
+        return
+
+    data = df[cols].dropna()
+
+    pearson = data.corr(method="pearson")
+    spearman = data.corr(method="spearman")
+
+    mic_df = _mic_matrix(data)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle(f"{station_name} — Correlation Matrices",
+                 fontsize=13, fontweight="bold")
+
+    for ax, matrix, title in zip(axes,
+                                 [pearson, spearman, mic_df],
+                                 ["Pearson", "Spearman", "MIC"]):
+        im = ax.imshow(matrix.values, vmin=-1, vmax=1,
+                       cmap="coolwarm", aspect="auto")
+        ax.set_xticks(range(len(cols)))
+        ax.set_yticks(range(len(cols)))
+        ax.set_xticklabels(cols, rotation=45, ha="right", fontsize=7)
+        ax.set_yticklabels(cols, fontsize=7)
+        ax.set_title(title, fontsize=11)
+        for i in range(len(cols)):
+            for j in range(len(cols)):
+                ax.text(j, i, f"{matrix.values[i, j]:.2f}",
+                        ha="center", va="center", fontsize=5, color="black")
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def overview_map_page(pdf: PdfPages, station_meta: list[dict]) -> None:
+    gdf = _build_geodataframe(station_meta)
+    if gdf.empty:
+        return
+    fig, ax = plt.subplots(figsize=(11, 8.5))
+    fig.suptitle("All Stations — Overview Map", fontsize=14, fontweight="bold")
+    _draw_map(ax, gdf)
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def station_map_page(pdf: PdfPages, station_meta: list[dict], current_idx: int, station_name: str) -> None:
+    gdf = _build_geodataframe(station_meta)
+    if gdf.empty:
+        return
+    fig, ax = plt.subplots(figsize=(11, 6))
+    fig.suptitle(f"{station_name} — Location", fontsize=13, fontweight="bold")
+    _draw_map(ax, gdf, highlight_idx=current_idx)
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def violin_page(pdf: PdfPages, df: pd.DataFrame, station_name: str) -> None:
     cols = numeric_cols(df)
     # Violin needs variance — skip constant or near-empty columns
@@ -427,15 +586,30 @@ def generate_report() -> None:
 
     with PdfPages(OUTPUT_PDF) as pdf:
         cover_page(pdf, "EPAGRI Weather Stations — EDA Report", parquets)
-
+        station_meta = []
+        dfs = []
         for path in parquets:
+            df = pd.read_parquet(path)
+            dfs.append(df)
+            station_meta.append({
+                "name": df["station_name"].iloc[0] if "station_name" in df.columns else path.stem,
+                "lat":  float(df["station_lat"].iloc[0]) if "station_lat" in df.columns else float("nan"),
+                "lon":  float(df["station_lon"].iloc[0]) if "station_lon" in df.columns else float("nan"),
+            })
+
+        # then inside PdfPages, after cover_page:
+        overview_map_page(pdf, station_meta)
+        features_table_page(pdf, station_meta, dfs)
+        for idx, (path, df) in enumerate(zip(parquets, dfs)):
             df = pd.read_parquet(path)
             name = df["station_name"].iloc[0] if "station_name" in df.columns else path.stem
             print(f"[station] {name}")
 
             station_header_page(pdf, df, path)
+            station_map_page(pdf, station_meta, idx, name)
             stats_page(pdf, df, name)
             histogram_page(pdf, df, name)
+            correlation_page(pdf, df, name)
             # precipitation_transformations_page(pdf, df, name)
             boxplot_page(pdf, df, name)
             # violin_page(pdf, df, name)
