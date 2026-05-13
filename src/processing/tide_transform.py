@@ -29,7 +29,7 @@ from scipy.signal import butter, filtfilt
 # ── Config ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = PROJECT_ROOT / "data" / "cleaned"
-FEATURES_DIR = PROJECT_ROOT / "data" / "features"
+FEATURES_DIR = PROJECT_ROOT / "data" / "processed"
 
 TIDE_PARQUET = PROCESSED_DIR / "tide_table.parquet"
 
