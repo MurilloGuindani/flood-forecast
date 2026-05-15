@@ -192,7 +192,7 @@ def parse_tide_file(filepath: Path, year: int) -> pd.DataFrame:
                                   day=current_day, hour=int(m.group(1)),
                                   minute=int(m.group(2)))
                 records.append(
-                    {"datetime": dt, "tide_level_m": float(m.group(3))})
+                    {"datetime": dt, "tide_level_cm": float(m.group(3))*100})
             except ValueError:
                 pass
         i += 1
@@ -227,6 +227,7 @@ def process_tides() -> None:
           .drop_duplicates()
           .sort_values("datetime")
           .reset_index(drop=True))
+    
 
     out_path = PROCESSED_DIR / "tide_table.parquet"
     df.to_parquet(out_path, index=False)

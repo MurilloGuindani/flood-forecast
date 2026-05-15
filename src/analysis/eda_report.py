@@ -35,43 +35,81 @@ TIME_COL = "datetime"
 
 
 def features_table_page(pdf: PdfPages, station_meta: list[dict], dfs: list[pd.DataFrame]) -> None:
-    # Collect all unique features across stations
     all_features = sorted({col for df in dfs for col in numeric_cols(df)})
+    
+    # Sort stations by name
+    paired = sorted(zip(station_meta, dfs), key=lambda x: x[0]["name"])
+    station_meta, dfs = zip(*paired)
     station_names = [m["name"] for m in station_meta]
 
-    # Build presence matrix
+    # Build presence + missing % matrix
     matrix = []
+    cell_colors = []
     for df in dfs:
-        cols = set(numeric_cols(df))
-        matrix.append(["✓" if f in cols else "" for f in all_features])
+        row = []
+        row_colors = []
+        for feature in all_features:
+            if feature not in df.columns:
+                row.append("")
+                row_colors.append("white")
+            else:
+                missing_pct = df[feature].isna().mean() * 100
+                if missing_pct < 1:
+                    row.append("✓")
+                    row_colors.append("#4C72B0")
+                elif missing_pct < 5:
+                    row.append("⚠")
+                    row_colors.append("#FFD700")
+                else:
+                    row.append("✗")
+                    row_colors.append("#D9534F")
+        matrix.append(row)
+        cell_colors.append(row_colors)
 
     fig, ax = plt.subplots(
-        figsize=(max(10, len(all_features) * 1.2), max(4, len(dfs) * 0.5 + 2)))
+        figsize=(max(6, len(all_features) * 0.8), max(6, len(station_names) * 0.5 + 4)))
+
     ax.axis("off")
-    ax.set_title("Feature Presence per Station",
-                 fontsize=13, fontweight="bold", pad=12)
+    ax.set_title("Feature Presence per Station", fontsize=13, fontweight="bold", pad=12)
 
     tbl = ax.table(
-        cellText=matrix,
-        rowLabels=station_names,
-        colLabels=all_features,
+    cellText=matrix,
+    rowLabels=station_names,
+    colLabels=all_features,
         cellLoc="center",
         loc="center",
     )
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(8)
-    tbl.scale(1.1, 1.6)
+    tbl.scale(0.9, 1.1)
+    tbl.auto_set_column_width(list(range(len(all_features))))
 
-    # Highlight present cells
     for (row, col), cell in tbl.get_celld().items():
+        if col == -1:  # row labels (features)
+            cell.set_text_props(fontsize=7)
         if row == 0:
-            cell.set_text_props(rotation=45, ha="left", fontsize=7)
-            cell.set_height(0.1)
-        if row > 0 and col >= 0 and cell.get_text().get_text() == "✓":
-            cell.set_facecolor("#4C72B0")
-            cell.set_text_props(color="white", fontweight="bold")
+            cell.set_text_props(rotation=70, ha="left", fontsize=7)
+            cell.set_height(0.15)
+        if row > 0 and col >= 0:
+            color = cell_colors[row - 1][col]
+            cell.set_facecolor(color)
+            text_color = "white" if color in ("#4C72B0", "#D9534F") else "black"
+            cell.set_text_props(color=text_color, fontweight="bold")
+
+    # Legend
+    from matplotlib.patches import Patch
+    legend = [
+        Patch(facecolor="#4C72B0", label="< 1% missing"),
+        Patch(facecolor="#FFD700", label="1–5% missing"),
+        Patch(facecolor="#D9534F", label="> 5% missing"),
+    ]
 
     fig.tight_layout()
+    fig.subplots_adjust(bottom=0.15)
+    fig.legend(handles=legend, loc="lower center", fontsize=8,
+            ncol=3, bbox_to_anchor=(0.5, 0.0), framealpha=0.8)
+    fig.subplots_adjust(bottom=0.15, top=0.95)
+    ax.set_ylim(-0.5, len(station_names) + 0.5)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -409,9 +447,19 @@ def _draw_map(ax, gdf, highlight_idx=None):
                     bbox=dict(boxstyle="round,pad=0.1", fc="white", alpha=0.5, lw=0))
     try:
         ctx.add_basemap(
-            ax, source=ctx.providers.OpenStreetMap.Mapnik, zoom=9)
+            ax, source=ctx.providers.OpenStreetMap.Mapnik, zoom='auto')
     except Exception:
         ax.set_facecolor("#cde")
+
+
+    # Expand bounds
+    x1, x2 = ax.get_xlim()
+    y1, y2 = ax.get_ylim()
+    xpad = (x2 - x1) * 0.5
+    ypad = (y2 - y1) * 0.1
+    ax.set_xlim(x1 - xpad, x2 + xpad)
+    ax.set_ylim(y1 - ypad, y2 + ypad)
+
     ax.set_axis_off()
 
 

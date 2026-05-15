@@ -52,7 +52,6 @@ def load_tide(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path)
     df = df.sort_values("datetime").drop_duplicates(
         "datetime").reset_index(drop=True)
-    df["tide_level_cm"] = df["tide_level_m"] * 100
     return df
 
 
