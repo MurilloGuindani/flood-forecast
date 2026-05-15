@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +44,25 @@ COLUMN_MAP = {
     "Altura da Maré(cm)":   "tide_level_cm"
 }
 # ─────────────────────────────────────────────────────────────────────────────
+INMET_COLUMN_MAP = {
+    "PRECIPITAÇÃO TOTAL, HORÁRIO (mm)":                       "precipitation_mm",
+    "PRESSAO ATMOSFERICA AO NIVEL DA ESTACAO, HORARIA (mB)":  "atm_pressure_mb",
+    "PRESSÃO ATMOSFERICA MAX.NA HORA ANT. (AUT) (mB)":        "atm_pressure_max_mb",
+    "PRESSÃO ATMOSFERICA MIN. NA HORA ANT. (AUT) (mB)":       "atm_pressure_min_mb",
+    "RADIACAO GLOBAL (Kj/m²)":                                "solar_radiation_kjm2",
+    "TEMPERATURA DO AR - BULBO SECO, HORARIA (°C)":           "temp_air_inst_c",
+    "TEMPERATURA DO PONTO DE ORVALHO (°C)":                   "dew_point_c",
+    "TEMPERATURA MÁXIMA NA HORA ANT. (AUT) (°C)":             "temp_max_c",
+    "TEMPERATURA MÍNIMA NA HORA ANT. (AUT) (°C)":             "temp_min_c",
+    "TEMPERATURA ORVALHO MAX. NA HORA ANT. (AUT) (°C)":       "dew_point_max_c",
+    "TEMPERATURA ORVALHO MIN. NA HORA ANT. (AUT) (°C)":       "dew_point_min_c",
+    "UMIDADE REL. MAX. NA HORA ANT. (AUT) (%)":               "rel_humidity_max_pct",
+    "UMIDADE REL. MIN. NA HORA ANT. (AUT) (%)":               "rel_humidity_min_pct",
+    "UMIDADE RELATIVA DO AR, HORARIA (%)":                    "rel_humidity_avg_pct",
+    "VENTO, DIREÇÃO HORARIA (gr) (° (gr))":                   "wind_dir_avg_deg",
+    "VENTO, RAJADA MAXIMA (m/s)":                             "wind_speed_max_ms",
+    "VENTO, VELOCIDADE HORARIA (m/s)":                        "wind_speed_avg_ms",
+}
 
 
 @dataclass
@@ -53,6 +73,171 @@ class StationMeta:
     lat: float
     lon: float
     altitude_m: float
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlam = np.radians(lon2 - lon1)
+    a = np.sin(dphi/2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam/2)**2
+    return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+
+
+def parse_inmet_meta(path: Path) -> dict:
+    meta = {}
+    with open(path, encoding="latin1") as f:
+        for line in f:
+            parts = line.strip().split(";")
+            if len(parts) < 2:
+                continue
+            key = parts[0].strip().rstrip(":")
+            val = parts[1].strip().replace(",", ".")
+            if key == "LATITUDE":
+                meta["lat"] = float(val)
+            elif key == "LONGITUDE":
+                meta["lon"] = float(val)
+            elif key == "ALTITUDE":
+                meta["alt_m"] = float(val)
+            elif key == "ESTACAO":
+                meta["name"] = val
+            elif key == "CODIGO (WMO)":
+                meta["station_id"] = val
+            elif key == "UF":
+                meta["city"] = val
+            if key == "Data":
+                break
+    return meta
+
+
+def load_inmet_csv(path: Path) -> tuple[dict, pd.DataFrame]:
+    meta = parse_inmet_meta(path)
+
+    df = pd.read_csv(
+        path,
+        sep=";",
+        skiprows=8,
+        header=0,
+        encoding="latin1",
+        na_values=["", "-9999", "-9999.0"],
+        decimal=",",
+    )
+
+    # Drop trailing empty column from trailing semicolon
+    df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+
+    df.rename(columns={'Data': 'DATA (YYYY-MM-DD)'},
+              inplace=True,  errors='ignore')
+    df.rename(columns={'HORA (UTC)': 'Hora UTC'},
+              inplace=True, errors='ignore')
+
+    df.rename(columns={'RADIACAO GLOBAL (Kj/m²)': 'RADIACAO GLOBAL (KJ/m²)'},
+              inplace=True, errors='ignore')
+
+    # Parse datetime
+    df["datetime"] = pd.to_datetime(
+        df['DATA (YYYY-MM-DD)'] + " " +
+        df["Hora UTC"].str.replace(" UTC", "", regex=False),
+        format="mixed",         errors="coerce",
+    )
+    df = df.drop(columns=['DATA (YYYY-MM-DD)', "Hora UTC"])
+    df = df.dropna(subset=["datetime"])
+
+    # Rename columns
+    df = df.rename(
+        columns={k: v for k, v in INMET_COLUMN_MAP.items() if k in df.columns})
+
+    # Add station metadata
+    df["station_name"] = meta.get("name", path.stem)
+    df["station_city"] = meta.get("city", "")
+    df["station_lat"] = meta.get("lat", float("nan"))
+    df["station_lon"] = meta.get("lon", float("nan"))
+    df["station_alt_m"] = meta.get("alt_m", float("nan"))
+
+    station_cols = ["station_name", "station_city",
+                    "station_lat", "station_lon", "station_alt_m"]
+    df = df[station_cols + [c for c in df.columns if c not in station_cols]]
+
+    df = df.sort_values("datetime").reset_index(drop=True)
+    return meta, df
+
+
+def process_inmet(center_lat: float = None, center_lon: float = None, radius_km: float = 100.0) -> None:
+    inmet_files = sorted(RAW_DIR.rglob("INMET_*.CSV"))
+    if not inmet_files:
+        print("[warn] no INMET CSV files found")
+        return
+
+    print(f"[inmet] found {len(inmet_files)} files")
+
+    for path in inmet_files:
+        meta, df = load_inmet_csv(path)
+
+        # Distance filter
+        if center_lat is not None and center_lon is not None:
+            dist = haversine_km(center_lat, center_lon,
+                                meta["lat"], meta["lon"])
+            if dist > radius_km:
+                print(f"[skip] {path.name} — {dist:.1f} km from center")
+
+        station_slug = slugify(meta.get("name", path.stem))
+        out_name = f"inmet_{meta.get('station_id', station_slug)}_{station_slug}.parquet"
+        out_path = PROCESSED_DIR / out_name
+        df.to_parquet(out_path, index=False)
+        print(
+            f"[ok] {path.name} -> {out_name}  ({len(df)} rows, {len(df.columns)} cols)")
+
+
+def process_inmet(center_lat: float = None, center_lon: float = None, radius_km: float = 100.0) -> None:
+    inmet_files = sorted(RAW_DIR.rglob("INMET_*.CSV"))
+    if not inmet_files:
+        print("[warn] no INMET CSV files found")
+        return
+
+    print(f"[inmet] found {len(inmet_files)} files")
+    names = {}
+    # Group by station ID (e.g. A898 from filename)
+    station_files: dict[str, str, list[Path]] = {}
+    for path in inmet_files:
+        parts = path.stem.split("_")
+        # INMET_S_SC_A898_CAMPOS_NOVOS_... → parts[3] is station ID
+        station_id = parts[3] if len(parts) > 3 else path.stem
+        names[station_id] = "_".join(parts[3:-3])
+        station_files.setdefault(station_id, []).append(path)
+
+    for station_id,  paths in station_files.items():
+        dfs = []
+        meta = None
+
+        meta = parse_inmet_meta(paths[0])
+
+        # Distance filter
+        if center_lat is not None and center_lon is not None:
+            dist = haversine_km(center_lat, center_lon,
+                                meta["lat"], meta["lon"])
+
+            if dist > radius_km:
+                print(
+                    f"[skip] {station_id} — {names[station_id]} — {dist:.1f} km from center")
+                continue
+
+        for path in sorted(paths):
+            m, df = load_inmet_csv(path)
+            if meta is None:
+                meta = m
+
+            dfs.append(df)
+
+        combined = (pd.concat(dfs, ignore_index=True)
+                    .drop_duplicates(subset=["datetime"])
+                    .sort_values("datetime")
+                    .reset_index(drop=True))
+
+        out_name = f"inmet_{station_id}_{names[station_id]}.parquet"
+        out_path = PROCESSED_DIR / out_name
+        combined.to_parquet(out_path, index=False)
+        print(
+            f"[ok] {station_id} ({len(paths)} files) -> {out_name}  ({len(combined)} rows, {len(combined.columns)} cols)")
 
 
 def slugify(text: str) -> str:
@@ -91,7 +276,7 @@ def fix_header_line(header: str) -> str:
     return header + ","
 
 
-def load_csv(file_path: Path) -> tuple[StationMeta, pd.DataFrame]:
+def load_epagri_csv(file_path: Path) -> tuple[StationMeta, pd.DataFrame]:
     with open(file_path, "r", encoding="cp1252") as f:
         meta_line = f.readline().rstrip("\n")
         header_line = f.readline().rstrip("\n")
@@ -246,7 +431,7 @@ def process_all() -> None:
 
     for path in csv_files:
         try:
-            meta, raw_df = load_csv(path)
+            meta, raw_df = load_epagri_csv(path)
             df = clean(raw_df, meta)
             out_name = f"{meta.station_id}_{slugify(meta.name)}.parquet"
             out_path = PROCESSED_DIR / out_name
@@ -257,6 +442,9 @@ def process_all() -> None:
             print(f"[error] {path.name}: {e}")
 
     process_tides()
+
+    # Florianópolis center — adjust or pass None to load all
+    process_inmet(center_lat=-27.59, center_lon=-48.55, radius_km=120.0)
 
 
 if __name__ == "__main__":
