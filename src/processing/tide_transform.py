@@ -28,7 +28,7 @@ from scipy.signal import butter, filtfilt
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PROCESSED_DIR = PROJECT_ROOT / "data" / "cleaned"
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 FEATURES_DIR = PROJECT_ROOT / "data" / "processed"
 
 TIDE_PARQUET = PROCESSED_DIR / "tide_table.parquet"
@@ -39,7 +39,7 @@ STATION_15_GLOB = "2951_*"   # change if station 15 has a different prefix
 
 # Sun-tide period: ~365.25 days — we use a low-pass cutoff slightly above this
 # to capture the annual + semi-annual signal
-SUN_TIDE_CUTOFF_DAYS = 60    # remove everything slower than 60 days
+SUN_TIDE_CUTOFF_DAYS = 40    # remove everything slower than 60 days
 # (captures annual, semi-annual, seasonal)
 
 SAMPLE_RATE_H = 1            # hourly data

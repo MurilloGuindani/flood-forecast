@@ -1,7 +1,7 @@
 """
 EPAGRI weather data preprocessor.
 Reads raw CSVs from data/raw/, parses metadata, cleans and translates
-columns, and saves one parquet per station to data/cleaned/.
+columns, and saves one parquet per station to data/processed/.
 """
 
 # claude-sonnet-4-20250514
@@ -19,7 +19,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BASE_DIR = PROJECT_ROOT / "data"
 RAW_DIR = BASE_DIR / "raw"
-PROCESSED_DIR = BASE_DIR / "cleaned"
+PROCESSED_DIR = BASE_DIR / "processed"
 
 NA_VALUES = ["9999.9", "9999", "9999,9", ""]
 MONTHS_PT = {
@@ -41,7 +41,7 @@ COLUMN_MAP = {
     "PressaoAtm(mB)":       "atm_pressure_mb",
     "UmidRelMedia(%)":      "rel_humidity_avg_pct",
     "Precipitacao(mm)":     "precipitation_mm",
-    "Altura da Maré(cm)":   "tide_level_cm"
+    "Altura da Mare(cm)":   "tide_level_cm"
 }
 # ─────────────────────────────────────────────────────────────────────────────
 INMET_COLUMN_MAP = {

@@ -4,6 +4,7 @@ Reads processed parquets, produces descriptive stats + plots per station,
 and compiles everything into a single PDF report.
 
 Output: data/reports/eda_report.pdf
+FIXME: After adding INMET data the report generator is not working properly
 """
 
 # claude-sonnet-4-20250514
@@ -24,7 +25,7 @@ from shapely.geometry import Point
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PROCESSED_DIR = PROJECT_ROOT / "data" / "cleaned"
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 REPORTS_DIR = PROJECT_ROOT / "data" / "reports"
 OUTPUT_PDF = REPORTS_DIR / "eda_report.pdf"
 
