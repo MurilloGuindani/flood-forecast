@@ -13,13 +13,22 @@ Input features:
 Targets: observed tide at t+1h, t+6h, t+24h
 """
 
-# claude-sonnet-4-20250514
+# claude-sonnet-4-20250514 & GPT 5.5
 
+from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
+
+
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT  = Path(__file__).resolve().parents[2]
@@ -27,8 +36,28 @@ CLEANED_DIR   = PROJECT_ROOT / "data" / "processed"
 FEATURES_DIR  = PROJECT_ROOT / "data" / "features"
 
 TARGET_STATION_GLOB = "2951_*.parquet"
-TIDE_HOURLY         = CLEANED_DIR / "tide_hourly_cm.parquet"
+TIDE_HOURLY         = CLEANED_DIR / "tide_with_reconstructed_sun.parquet"
+# TIDE_HOURLY         = CLEANED_DIR / "tide_with_reconstructed_sun.parquet"
 TIDE_RESIDUAL       = CLEANED_DIR / "tide_residual.parquet"
+FLOOD_EVENTS = ['29/07/2025',
+                '29/01/2025',
+                '29/12/2025',
+                '29/04/2025',
+                '11/05/2026',
+                '14/03/2025',
+                '24/06/2025',
+                '15/06/2025',
+                '29/05/2025',
+                '04/01/2026',
+                '30/03/2025',
+                '28/04/2025',
+                '09/12/2025',
+                '16/01/2025',
+                '17/02/2025',
+                '26/04/2026',
+                '11/12/2025',
+                '17/01/2025']
+
 
 # Lookback window for sequence models (hours)
 LOOKBACK_H    = 72
@@ -65,6 +94,146 @@ def wind_components(speed: pd.Series, direction_deg: pd.Series) -> tuple[pd.Seri
     v = -speed * np.cos(rad)
     return u, v
 
+
+# Feature selection
+
+
+def remove_redundant_features(
+    df: pd.DataFrame,
+    std_threshold: float = 0.01,
+    corr_threshold: float = 0.95,
+    missing_threshold: float = 0.95,
+) -> Tuple[pd.DataFrame, Dict[str, List[str]]]:
+    """
+    Remove redundant features and return a report explaining why.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe.
+    std_threshold : float
+        Features with std < threshold are removed.
+    corr_threshold : float
+        One feature from each pair with abs(corr) > threshold is removed.
+    missing_threshold : float
+        Features with missing fraction > threshold are removed.
+
+    Returns
+    -------
+    filtered_df : pd.DataFrame
+    report : dict
+        Dictionary containing removed features by criterion.
+    """
+
+    X = df.copy()
+
+    report = {
+        "constant_features": [],
+        "near_zero_variance": [],
+        "high_missingness": [],
+        "duplicate_columns": [],
+        "high_correlation": [],
+    }
+
+    # ------------------------------------------------------------------
+    # 1. Constant features
+    # ------------------------------------------------------------------
+    constant_cols = [
+        c for c in X.columns
+        if X[c].nunique(dropna=False) <= 1
+    ]
+
+    report["constant_features"] = constant_cols
+    X = X.drop(columns=constant_cols)
+
+    # ------------------------------------------------------------------
+    # 2. Near-zero variance (numeric only)
+    # ------------------------------------------------------------------
+    numeric_cols = X.select_dtypes(include=np.number).columns
+
+    low_var_cols = [
+        c for c in numeric_cols
+        if X[c].std(skipna=True) < std_threshold
+    ]
+
+    report["near_zero_variance"] = low_var_cols
+    X = X.drop(columns=low_var_cols)
+
+    # ------------------------------------------------------------------
+    # 3. High missingness
+    # ------------------------------------------------------------------
+    missing_cols = [
+        c for c in X.columns
+        if X[c].isna().mean() > missing_threshold
+    ]
+
+    report["high_missingness"] = missing_cols
+    X = X.drop(columns=missing_cols)
+
+    # ------------------------------------------------------------------
+    # 4. Duplicate columns
+    # ------------------------------------------------------------------
+    duplicate_cols = []
+
+    cols = list(X.columns)
+
+    for i in range(len(cols)):
+        col_i = cols[i]
+
+        if col_i in duplicate_cols:
+            continue
+
+        for j in range(i + 1, len(cols)):
+            col_j = cols[j]
+
+            if X[col_i].equals(X[col_j]):
+                duplicate_cols.append(col_j)
+
+    report["duplicate_columns"] = duplicate_cols
+    X = X.drop(columns=duplicate_cols)
+    # ------------------------------------------------------------------
+    # 5. High correlation
+    # Keep first feature, remove later ones.
+    # ------------------------------------------------------------------
+
+    numeric_cols = X.select_dtypes(include=np.number).columns
+
+    corr_matrix = X[numeric_cols].corr().abs()
+
+    upper = corr_matrix.where(
+        np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+    )
+
+    corr_remove = []
+    corr_report = []
+
+    for col in upper.columns:
+
+        correlated_with = upper.index[upper[col] > corr_threshold]
+
+        if len(correlated_with) > 0:
+
+            kept_col = correlated_with[0]
+
+            corr_value = float(
+                upper.loc[kept_col, col]
+            )
+
+            corr_remove.append(col)
+
+            corr_report.append(
+                {
+                    "removed": col,
+                    "kept": kept_col,
+                    "correlation": round(corr_value, 4),
+                }
+            )
+
+    report["high_correlation"] = corr_report
+
+    X = X.drop(columns=corr_remove)
+
+    return X, report
 
 # ── Load target ───────────────────────────────────────────────────────────────
 
@@ -291,7 +460,7 @@ def build_sequences(flat: pd.DataFrame) -> dict:
     return {"X": X, "y": y, "times": t, "feature_names": np.array(feature_cols)}
 
 
-def split_dataset(flat: pd.DataFrame, 
+def split_dataset(flat: pd.DataFrame,
                   val_ratio: float = 0.15,
                   test_ratio: float = 0.15,
                   random_state: int = 42) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -311,7 +480,14 @@ def split_dataset(flat: pd.DataFrame,
 
     train_2024 = df[df["datetime"].dt.year == 2024].copy()
     rest       = df[df["datetime"].dt.year >= 2025].copy()
+    # Convert flood dates to week block ids
+    flood_dates = pd.to_datetime(FLOOD_EVENTS, format="%d/%m/%Y")
 
+    flood_blocks = set(
+        flood_dates.to_series().apply(
+            lambda d: f"{d.isocalendar().year}_{d.isocalendar().week:02d}"
+        )
+    )
     # ── Block sampling on rest (weekly blocks) ────────────────────────────────
     rest["_week_block"] = (
         rest["datetime"].dt.isocalendar().year.astype(str) + "_" +
@@ -320,12 +496,21 @@ def split_dataset(flat: pd.DataFrame,
     blocks = rest["_week_block"].unique()
     rng.shuffle(blocks)
 
-    n_val  = int(len(blocks) * val_ratio)
+    # Remove flood blocks from random allocation
+    available_blocks = [b for b in blocks if b not in flood_blocks]
+
+    n_val = int(len(blocks) * val_ratio)
     n_test = int(len(blocks) * test_ratio)
 
-    val_blocks   = set(blocks[:n_val])
-    test_blocks  = set(blocks[n_val: n_val + n_test])
-    train_blocks = set(blocks[n_val + n_test:])
+    val_blocks = set(available_blocks[:n_val])
+    test_blocks = set(available_blocks[n_val:n_val + n_test])
+    train_blocks = set(available_blocks[n_val + n_test:])
+
+    # Force flood weeks into test
+    test_blocks.update(flood_blocks)
+    # Safety: ensure flood weeks are not elsewhere
+    train_blocks.difference_update(flood_blocks)
+    val_blocks.difference_update(flood_blocks)
 
     rest_train = rest[rest["_week_block"].isin(train_blocks)].copy()
     val        = rest[rest["_week_block"].isin(val_blocks)].copy()
@@ -369,10 +554,11 @@ def main() -> None:
     feature_cols = [c for c in flat.columns
                     if c != "datetime" and c not in target_cols]
 
-    # Drop columns with >30% missing, then drop remaining NaN rows
+    # Drop columns with >10% missing, then drop remaining NaN rows
     missing      = flat[feature_cols].isna().mean()
-    drop_cols    = missing[missing > 0.3].index.tolist()
-    flat         = flat.drop(columns=drop_cols).dropna().reset_index(drop=True)
+    drop_cols    = missing[missing > 0.1].index.tolist()
+    flat         = flat.drop(columns=drop_cols)
+    #flat         = flat.dropna().reset_index(drop=True)
 
     print(f"  rows:          {len(flat)}")
     print(f"  features:      {len([c for c in flat.columns if c not in target_cols and c != 'datetime'])}")
@@ -381,7 +567,20 @@ def main() -> None:
     flat.to_parquet(FEATURES_DIR / "ml_features_flat.parquet", index=False)
     print(f"[saved] ml_features_flat.parquet")
 
-    train, val, test = split_dataset(flat)
+    flat, report =  remove_redundant_features(flat)
+
+    for reason, cols in report.items():
+        print(f"\n{reason}: {len(cols)}")
+        if reason != "high_correlation":
+            for c in cols:
+                print(f"  - {c}")
+    for item in report["high_correlation"]:
+        print(
+            f"Removed {item['removed']}"
+            f" (corr={item['correlation']:.3f})"
+            f" with {item['kept']}"
+        )
+    train, val, test = split_dataset(flat,val_ratio=0.30,test_ratio=0.01)
     train.to_parquet(FEATURES_DIR / "split_train.parquet", index=False)
     val.to_parquet(FEATURES_DIR / "split_val.parquet",   index=False)
     test.to_parquet(FEATURES_DIR / "split_test.parquet", index=False)
@@ -389,15 +588,37 @@ def main() -> None:
 
     # ── Sequence ──────────────────────────────────────────────────────────────
     print("\n── Sequence tensors ──")
-    seq = build_sequences(flat)
+    seq = build_sequences(train)
     np.savez_compressed(
-        FEATURES_DIR / "ml_features_sequence.npz",
+        FEATURES_DIR / "ml_features_sequence_tr.npz",
         X=seq["X"],
         y=seq["y"],
         times=seq["times"].astype(str),
         feature_names=seq["feature_names"],
     )
-    print(f"[saved] ml_features_sequence.npz")
+    print(f"[saved] ml_features_sequence_tr.npz")
+    print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}")
+
+    seq = build_sequences(val)
+    np.savez_compressed(
+        FEATURES_DIR / "ml_features_sequence_val.npz",
+        X=seq["X"],
+        y=seq["y"],
+        times=seq["times"].astype(str),
+        feature_names=seq["feature_names"],
+    )
+    print(f"[saved] ml_features_sequence_val.npz")
+    print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}")
+
+    seq = build_sequences(test)
+    np.savez_compressed(
+        FEATURES_DIR / "ml_features_sequence_te.npz",
+        X=seq["X"],
+        y=seq["y"],
+        times=seq["times"].astype(str),
+        feature_names=seq["feature_names"],
+    )
+    print(f"[saved] ml_features_sequence_te.npz")
     print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}")
 
 
