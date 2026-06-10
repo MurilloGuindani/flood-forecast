@@ -41,21 +41,17 @@ TIDE_HOURLY         = CLEANED_DIR / "tide_with_reconstructed_sun.parquet"
 TIDE_RESIDUAL       = CLEANED_DIR / "tide_residual.parquet"
 FLOOD_EVENTS = ['29/07/2025',
                 '29/01/2025',
-                '29/12/2025',
+                #'29/12/2025',
                 '29/04/2025',
-                '11/05/2026',
+                # '11/05/2026',
                 '14/03/2025',
-                '24/06/2025',
-                '15/06/2025',
-                '29/05/2025',
+                #'24/06/2025',
+                #'29/05/2025',
                 '04/01/2026',
-                '30/03/2025',
+                #'30/03/2025',
                 '28/04/2025',
-                '09/12/2025',
-                '16/01/2025',
-                '17/02/2025',
-                '26/04/2026',
-                '11/12/2025',
+                #'16/01/2025',
+                #'11/12/2025',
                 '17/01/2025']
 
 
@@ -63,7 +59,7 @@ FLOOD_EVENTS = ['29/07/2025',
 LOOKBACK_H    = 72
 
 # Forecast horizons (hours ahead)
-HORIZONS      = [1, 6, 24]
+HORIZONS      = [1]
 
 # Lag steps for flat features
 LAG_STEPS     = [1, 2, 3, 6, 12, 24, 48, 72]
@@ -258,18 +254,6 @@ def build_index(target: pd.Series) -> pd.DatetimeIndex:
     )
 
 
-# ── Temporal features ─────────────────────────────────────────────────────────
-
-def temporal_features(index: pd.DatetimeIndex) -> pd.DataFrame:
-    df = pd.DataFrame(index=index)
-    hour      = pd.Series(index.hour,      index=index)
-    month     = pd.Series(index.month,     index=index)
-    dayofyear = pd.Series(index.dayofyear, index=index)
-    df["hour_sin"],      df["hour_cos"]      = cyclical_encode(hour,      24)
-    df["month_sin"],     df["month_cos"]     = cyclical_encode(month,     12)
-    df["dayofyear_sin"], df["dayofyear_cos"] = cyclical_encode(dayofyear, 365.25)
-    return df
-
 
 # ── Tide features ─────────────────────────────────────────────────────────────
 
@@ -337,6 +321,7 @@ def weather_features(index: pd.DatetimeIndex, cleaned_dir: Path) -> pd.DataFrame
     all_wind_v   = []
 
     for path in station_files:
+        print(path)
         sid = path.stem[:30]
         try:
             sdf = load_station(path, index)
@@ -414,8 +399,7 @@ def weather_features(index: pd.DatetimeIndex, cleaned_dir: Path) -> pd.DataFrame
 
 def assemble_flat(index: pd.DatetimeIndex, target: pd.Series,
                   cleaned_dir: Path) -> pd.DataFrame:
-    feat = temporal_features(index)
-    feat = feat.join(tide_features(index))
+    feat = tide_features(index)
     feat = feat.join(weather_features(index, cleaned_dir))
 
     # Targets
@@ -427,6 +411,7 @@ def assemble_flat(index: pd.DatetimeIndex, target: pd.Series,
     feat.insert(0, "datetime", feat.pop("datetime"))
 
     target_cols = [f"target_t+{h}h" for h in HORIZONS]
+
     return feat.dropna(subset=target_cols).reset_index(drop=True)
 
 
@@ -441,7 +426,11 @@ def build_sequences(flat: pd.DataFrame) -> dict:
     """
     target_cols  = [f"target_t+{h}h" for h in HORIZONS]
     feature_cols = [c for c in flat.columns
-                    if c != "datetime" and c not in target_cols]
+                    if c != "datetime" and c not in target_cols
+                    and ('roll' not in c or 'roll1h' in c)
+                    and ('lag' not in c or 'lag1h' in c)]
+
+    print(feature_cols)
 
     flat_clean   = flat.dropna(subset=feature_cols).reset_index(drop=True)
     feat_arr     = flat_clean[feature_cols].values.astype(np.float32)
@@ -556,9 +545,13 @@ def main() -> None:
 
     # Drop columns with >10% missing, then drop remaining NaN rows
     missing      = flat[feature_cols].isna().mean()
-    drop_cols    = missing[missing > 0.1].index.tolist()
+    drop_cols    = missing[missing > 0.4].index.tolist()
+    print("TO_DROP", drop_cols)
     flat         = flat.drop(columns=drop_cols)
-    #flat         = flat.dropna().reset_index(drop=True)
+    fill_cols = [c for c in feature_cols if c not in drop_cols]
+    flat[fill_cols] = flat[fill_cols].fillna(
+        flat[fill_cols].rolling(window=4, min_periods=1).mean()
+    )
 
     print(f"  rows:          {len(flat)}")
     print(f"  features:      {len([c for c in flat.columns if c not in target_cols and c != 'datetime'])}")
@@ -580,7 +573,7 @@ def main() -> None:
             f" (corr={item['correlation']:.3f})"
             f" with {item['kept']}"
         )
-    train, val, test = split_dataset(flat,val_ratio=0.30,test_ratio=0.01)
+    train, val, test = split_dataset(flat,val_ratio=0.30,test_ratio=0.07)
     train.to_parquet(FEATURES_DIR / "split_train.parquet", index=False)
     val.to_parquet(FEATURES_DIR / "split_val.parquet",   index=False)
     test.to_parquet(FEATURES_DIR / "split_test.parquet", index=False)

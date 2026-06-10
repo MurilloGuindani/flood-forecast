@@ -162,7 +162,7 @@ def load_inmet_csv(path: Path) -> tuple[dict, pd.DataFrame]:
     return meta, df
 
 
-def process_inmet(center_lat: float = None, center_lon: float = None, radius_km: float = 100.0) -> None:
+def process_inmet(center_lat: float = None, center_lon: float = None, radius_km: float = 200.0) -> None:
     inmet_files = sorted(RAW_DIR.rglob("INMET_*.CSV"))
     if not inmet_files:
         print("[warn] no INMET CSV files found")
@@ -412,7 +412,7 @@ def process_tides() -> None:
           .drop_duplicates()
           .sort_values("datetime")
           .reset_index(drop=True))
-    
+
 
     out_path = PROCESSED_DIR / "tide_table.parquet"
     df.to_parquet(out_path, index=False)
@@ -444,7 +444,7 @@ def process_all() -> None:
     process_tides()
 
     # Florianópolis center — adjust or pass None to load all
-    process_inmet(center_lat=-27.59, center_lon=-48.55, radius_km=120.0)
+    process_inmet(center_lat=-27.59, center_lon=-48.55, radius_km=200.0)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from torch.utils.data import DataLoader, TensorDataset, random_split
+from sklearn.preprocessing import RobustScaler
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -37,17 +38,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODELS_DIR   = PROJECT_ROOT / "data" / "models" / "nn"
 PLOTS_DIR    = MODELS_DIR / "plots"
 FEATURES_DIR  = PROJECT_ROOT / "data" / "features"
-
-HORIZONS   = [1, 6, 24]
-BATCH_SIZE = 256
-EPOCHS     = 100
+HORIZONS   = [1]
+BATCH_SIZE = 512
+EPOCHS     = 5
 SEED       = 42
 
 # Hyper-parameter grid — searched on VAL set
 PARAM_GRID = {
-    "hidden_size": [64, 128, 256, 512],
+    "hidden_size": [64, 128, 256],
     "num_layers":  [1, 2, 4],
-    "dropout":     [0.1, 0.2],
+    "dropout":     [0.1, 0.15],
     "lr":          [1e-2, 1e-3, 5e-4],
 }
 
@@ -64,22 +64,87 @@ def load_npz(path: str):
     return X, y
 
 
+
 def normalize(X_tr, y_tr, X_val, y_val, X_te, y_te):
+    """
+    Robust scaling using train statistics only.
 
-    # Normalise on train statistics only
-    mean = X_tr.mean(dim=(0, 1), keepdim=True)
-    std  = X_tr.std(dim=(0, 1),  keepdim=True).clamp(min=1e-8)
-    X_tr  = (X_tr  - mean) / std
-    X_val = (X_val - mean) / std
-    X_te  = (X_te  - mean) / std
+    X shape: (N, T, F)
+    y shape: (N, H)
 
-    return (
-        TensorDataset(X_tr,  y_tr),
-        TensorDataset(X_val, y_val),
-        TensorDataset(X_te,  y_te),
+    Returns:
+        train_ds
+        val_ds
+        test_ds
+        x_scaler
+        y_scaler
+    """
+
+    # --------------------------------------------------
+    # X scaler
+    # --------------------------------------------------
+
+    x_scaler = RobustScaler()
+
+    X_tr_flat = X_tr.reshape(-1, X_tr.shape[-1]).cpu().numpy()
+
+    x_scaler.fit(X_tr_flat)
+
+    X_tr_scaled = torch.as_tensor(
+        x_scaler.transform(X_tr_flat),
+        dtype=X_tr.dtype,
+        device=X_tr.device,
+    ).reshape(X_tr.shape)
+
+    X_val_scaled = torch.as_tensor(
+        x_scaler.transform(
+            X_val.reshape(-1, X_val.shape[-1]).cpu().numpy()
+        ),
+        dtype=X_val.dtype,
+        device=X_val.device,
+    ).reshape(X_val.shape)
+
+    X_te_scaled = torch.as_tensor(
+        x_scaler.transform(
+            X_te.reshape(-1, X_te.shape[-1]).cpu().numpy()
+        ),
+        dtype=X_te.dtype,
+        device=X_te.device,
+    ).reshape(X_te.shape)
+
+    # --------------------------------------------------
+    # y scaler
+    # --------------------------------------------------
+
+    y_scaler = RobustScaler()
+
+    y_scaler.fit(y_tr.cpu().numpy())
+
+    y_tr_scaled = torch.as_tensor(
+        y_scaler.transform(y_tr.cpu().numpy()),
+        dtype=y_tr.dtype,
+        device=y_tr.device,
     )
 
+    y_val_scaled = torch.as_tensor(
+        y_scaler.transform(y_val.cpu().numpy()),
+        dtype=y_val.dtype,
+        device=y_val.device,
+    )
 
+    y_te_scaled = torch.as_tensor(
+        y_scaler.transform(y_te.cpu().numpy()),
+        dtype=y_te.dtype,
+        device=y_te.device,
+    )
+
+    return (
+        TensorDataset(X_tr_scaled, y_tr_scaled),
+        TensorDataset(X_val_scaled, y_val_scaled),
+        TensorDataset(X_te_scaled, y_te_scaled),
+        x_scaler,
+        y_scaler,
+    )
 # ── Models ────────────────────────────────────────────────────────────────────
 # GPT-5.5
 
@@ -196,10 +261,18 @@ def predict_all(model, loader, device):
     return torch.cat(preds).numpy(), torch.cat(targets).numpy()
 
 
-def metrics_dict(preds, targets, split: str, model_name: str) -> list[dict]:
+def metrics_dict(preds, targets, split: str, model_name: str, y_scaler) -> list[dict]:
+
+    preds = y_scaler.inverse_transform(preds)
+    targets = y_scaler.inverse_transform(targets)
+
     rows = []
+
     for i, h in enumerate(HORIZONS):
-        p, t = preds[:, i], targets[:, i]
+
+        p = preds[:, i]
+        t = targets[:, i]
+
         rows.append({
             "model":   model_name,
             "horizon": f"t+{h}h",
@@ -208,6 +281,7 @@ def metrics_dict(preds, targets, split: str, model_name: str) -> list[dict]:
             "mae":     mean_absolute_error(t, p),
             "r2":      r2_score(t, p),
         })
+
     return rows
 
 
@@ -381,7 +455,7 @@ def plot_residuals(preds, targets, name, horizon, split, plots_dir):
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-def run(arch_name, input_size, train_ds, val_ds, test_ds, device, all_metrics):
+def run(arch_name, input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler):
     print(f"\n{'═'*60}")
     print(f"  {arch_name}")
     print(f"{'═'*60}")
@@ -406,17 +480,17 @@ def run(arch_name, input_size, train_ds, val_ds, test_ds, device, all_metrics):
     test_preds, test_targets = predict_all(model, test_loader, device)
 
     print(f"\n  ── {arch_name} VAL Results ──")
-    for row in metrics_dict(val_preds, val_targets, "val", arch_name):
+    for row in metrics_dict(val_preds, val_targets, "val", arch_name, y_scaler):
         print(f"    {row['horizon']}  RMSE={row['rmse']:.3f}  "
               f"MAE={row['mae']:.3f}  R²={row['r2']:.4f}")
 
     print(f"\n  ── {arch_name} TEST Results ──")
-    for row in metrics_dict(test_preds, test_targets, "test", arch_name):
+    for row in metrics_dict(test_preds, test_targets, "test", arch_name, y_scaler):
         print(f"    {row['horizon']}  RMSE={row['rmse']:.3f}  "
               f"MAE={row['mae']:.3f}  R²={row['r2']:.4f}")
 
-    all_metrics.extend(metrics_dict(val_preds,  val_targets,  "val",  arch_name))
-    all_metrics.extend(metrics_dict(test_preds, test_targets, "test", arch_name))
+    all_metrics.extend(metrics_dict(val_preds,  val_targets,  "val",  arch_name, y_scaler))
+    all_metrics.extend(metrics_dict(test_preds, test_targets, "test", arch_name, y_scaler))
 
     # 4. Save checkpoint
     ckpt = MODELS_DIR / f"{arch_name.lower()}_best.pt"
@@ -452,19 +526,20 @@ def main():
     X_tr, y_tr = load_npz(FEATURES_DIR /"ml_features_sequence_tr.npz")
     X_val, y_val = load_npz(FEATURES_DIR /"ml_features_sequence_val.npz")
     X_te, y_te = load_npz(FEATURES_DIR /"ml_features_sequence_te.npz")
-    train_ds, val_ds, test_ds = normalize(X_tr, y_tr, X_val, y_val, X_te, y_te)
+    train_ds, val_ds, test_ds, X_scaler,y_scaler = normalize(X_tr, y_tr, X_val, y_val, X_te, y_te)
+    print(y_scaler)
     input_size = X_tr.shape[2]
     print(f"[info]   features={input_size}  lookback={X_tr.shape[1]}h  horizons={HORIZONS}")
     print(f"[splits] train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
 
     all_metrics = []
 
-    if args.model in ("mlp", "both"):
-        run("MLP",  input_size, train_ds, val_ds, test_ds, device, all_metrics)
+    # if args.model in ("mlp", "both"):
+    #     run("MLP",  input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler)
     if args.model in ("lstm", "both"):
-        run("LSTM", input_size, train_ds, val_ds, test_ds, device, all_metrics)
-    if args.model in ("gru", "both"):
-        run("GRU",  input_size, train_ds, val_ds, test_ds, device, all_metrics)
+        run("LSTM", input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler)
+    # if args.model in ("gru", "both"):
+    #     run("GRU",  input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler)
 
 
     # Save metrics
