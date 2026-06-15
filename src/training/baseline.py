@@ -29,20 +29,24 @@ FEATURES_DIR  = PROJECT_ROOT / "data" / "features"
 MODELS_DIR    = PROJECT_ROOT / "data" / "models"
 PLOTS_DIR     = MODELS_DIR / "plots"
 
-HORIZONS      = [1, 6, 24]
+HORIZONS      = [1]
 
 XGB_GRID = {
     "n_estimators":     [300, 600],
-    "max_depth":        [4, 6],
+    "max_depth":        [4, 6, 8],
     "learning_rate":    [0.05, 0.1],
-    "subsample":        [0.8],
-    "colsample_bytree": [0.8],
+    "subsample":        [0.7, 0.8],
+    "colsample_bytree": [0.7, 0.8],
+    "reg_alpha":        [0.0, 0.1, 1.0],   # L1
+    "reg_lambda":       [1.0, 5.0, 10.0],  # L2
 }
 
 RF_GRID = {
     "n_estimators": [200, 400],
     "max_depth":    [10, 20, None],
     "max_features": [0.5, "sqrt"],
+    "min_samples_leaf": [1, 5, 10],  # implicit regularization
+    "max_samples":      [0.7, 0.9],  # bagging fraction
 }
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -71,26 +75,34 @@ def feature_cols(df: pd.DataFrame) -> list[str]:
 
 
 # ── Grid search on val set ────────────────────────────────────────────────────
-
 def grid_search(model_cls, param_grid: dict, X_tr, y_tr, X_val, y_val,
                 fit_kwargs: dict = {}) -> tuple[object, dict]:
+    configs = list(ParameterGrid(param_grid))
+    total   = len(configs)
+    print(f"    {'config':>6}  {'params':<60}  val_rmse")
+    print(f"    {'─'*80}")
+
     best_rmse   = float("inf")
     best_model  = None
     best_params = None
 
-    for params in ParameterGrid(param_grid):
+    for idx, params in enumerate(configs, 1):
         model = model_cls(**params, random_state=42, n_jobs=-1)
         model.fit(X_tr, y_tr, **fit_kwargs)
         preds = model.predict(X_val)
         rmse  = np.sqrt(mean_squared_error(y_val, preds))
+
+        marker = " ◄ best" if rmse < best_rmse else ""
+        param_str = "  ".join(f"{k}={v}" for k, v in params.items())
+        print(f"    {idx:>6}  {param_str:<60}  {rmse:.3f}{marker}")
+
         if rmse < best_rmse:
             best_rmse   = rmse
             best_model  = model
             best_params = params
 
-    print(f"    best params: {best_params}  val RMSE: {best_rmse:.3f}")
+    print(f"\n    best params: {best_params}  val RMSE: {best_rmse:.3f}")
     return best_model, best_params
-
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 

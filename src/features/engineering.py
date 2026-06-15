@@ -55,6 +55,7 @@ FLOOD_EVENTS = ['29/07/2025',
                 '17/01/2025']
 
 
+
 # Lookback window for sequence models (hours)
 LOOKBACK_H    = 72
 
@@ -526,6 +527,76 @@ def split_dataset(flat: pd.DataFrame,
 
     return train, val, test
 
+
+
+def build_and_split(flat: pd.DataFrame, val_ratio=0.20, test_ratio=0.10):
+    # Sort first — critical
+    flat = flat.sort_values("datetime").reset_index(drop=True)
+
+    seq = build_sequences(flat)  # build on full contiguous data
+    X, y, times = seq["X"], seq["y"], seq["times"]
+
+    N = len(X)
+    n_test = int(N * test_ratio)
+    n_val  = int(N * val_ratio)
+    n_train = N - n_val - n_test
+
+    return (
+        (X[:n_train],            y[:n_train]),
+        (X[n_train:n_train+n_val], y[n_train:n_train+n_val]),
+        (X[n_train+n_val:],      y[n_train+n_val:]),
+    )
+
+def split_chronological(
+    flat: pd.DataFrame,
+    flood_events: list[str],
+    val_ratio: float = 0.20,
+    test_ratio: float = 0.10,
+    block_days: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Chronological train/val/test split.
+    Flood event blocks (±block_days window) are always forced into test.
+    """
+    flat = flat.sort_values("datetime").reset_index(drop=True)
+
+    flood_dates = pd.to_datetime(flood_events, format="%d/%m/%Y")
+
+    # Block ID: days since epoch // block_days
+    flat["_block"] = (
+        flat["datetime"].dt.floor("D").astype(np.int64) // (86400 * 1e9 * block_days)
+    ).astype(int)
+
+    flood_blocks = set()
+    for d in flood_dates:
+        block_id = int(pd.Timestamp(d).floor("D").value // (86400 * 1e9 * block_days))
+        flood_blocks.add(block_id)
+
+    flood_mask = flat["_block"].isin(flood_blocks)
+    flood_df   = flat[flood_mask].copy()
+    rest_df    = flat[~flood_mask].copy().reset_index(drop=True)
+
+    N       = len(rest_df)
+    n_test  = int(N * test_ratio)
+    n_val   = int(N * val_ratio)
+    n_train = N - n_val - n_test
+
+    train = rest_df.iloc[:n_train].drop(columns=["_block"])
+    val   = rest_df.iloc[n_train:n_train + n_val].drop(columns=["_block"])
+    test  = (
+        pd.concat([rest_df.iloc[n_train + n_val:], flood_df])
+        .sort_values("datetime")
+        .reset_index(drop=True)
+        .drop(columns=["_block"])
+    )
+
+    for d in flood_dates:
+        in_test = (pd.to_datetime(test["datetime"]).dt.date == d.date()).any()
+        print(f"  flood {d.date()} → {'test ✓' if in_test else 'MISSING ✗'}")
+
+    print(f"\n[split] train={len(train)}  val={len(val)}  test={len(test)}")
+    return train, val, test
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -543,24 +614,23 @@ def main() -> None:
     feature_cols = [c for c in flat.columns
                     if c != "datetime" and c not in target_cols]
 
-    # Drop columns with >10% missing, then drop remaining NaN rows
-    missing      = flat[feature_cols].isna().mean()
-    drop_cols    = missing[missing > 0.4].index.tolist()
-    print("TO_DROP", drop_cols)
-    flat         = flat.drop(columns=drop_cols)
+    missing   = flat[feature_cols].isna().mean()
+    drop_cols = missing[missing > 0.4].index.tolist()
+    flat      = flat.drop(columns=drop_cols)
+
     fill_cols = [c for c in feature_cols if c not in drop_cols]
     flat[fill_cols] = flat[fill_cols].fillna(
         flat[fill_cols].rolling(window=4, min_periods=1).mean()
     )
 
-    print(f"  rows:          {len(flat)}")
-    print(f"  features:      {len([c for c in flat.columns if c not in target_cols and c != 'datetime'])}")
-    print(f"  dropped cols:  {len(drop_cols)}")
+    print(f"  rows:         {len(flat)}")
+    print(f"  features:     {len([c for c in flat.columns if c not in target_cols and c != 'datetime'])}")
+    print(f"  dropped cols: {len(drop_cols)}")
 
     flat.to_parquet(FEATURES_DIR / "ml_features_flat.parquet", index=False)
-    print(f"[saved] ml_features_flat.parquet")
+    print("[saved] ml_features_flat.parquet")
 
-    flat, report =  remove_redundant_features(flat)
+    flat, report = remove_redundant_features(flat)
 
     for reason, cols in report.items():
         print(f"\n{reason}: {len(cols)}")
@@ -568,15 +638,13 @@ def main() -> None:
             for c in cols:
                 print(f"  - {c}")
     for item in report["high_correlation"]:
-        print(
-            f"Removed {item['removed']}"
-            f" (corr={item['correlation']:.3f})"
-            f" with {item['kept']}"
-        )
-    train, val, test = split_dataset(flat,val_ratio=0.30,test_ratio=0.07)
+        print(f"Removed {item['removed']} (corr={item['correlation']:.3f}) with {item['kept']}")
+
+    train, val, test = split_chronological(flat, FLOOD_EVENTS)
+
     train.to_parquet(FEATURES_DIR / "split_train.parquet", index=False)
-    val.to_parquet(FEATURES_DIR / "split_val.parquet",   index=False)
-    test.to_parquet(FEATURES_DIR / "split_test.parquet", index=False)
+    val.to_parquet(FEATURES_DIR / "split_val.parquet",     index=False)
+    test.to_parquet(FEATURES_DIR / "split_test.parquet",   index=False)
     print("[saved] split_train / split_val / split_test")
 
     # ── Sequence ──────────────────────────────────────────────────────────────
@@ -613,6 +681,23 @@ def main() -> None:
     )
     print(f"[saved] ml_features_sequence_te.npz")
     print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}")
+    flood_dates = pd.to_datetime(FLOOD_EVENTS, format="%d/%m/%Y")
+
+    # get observed tide at each flood event
+    target = load_target(CLEANED_DIR)
+    flood_levels = []
+    for d in flood_dates:
+        # get max tide in ±12h window around the event
+        window = target[
+            (target.index >= d - pd.Timedelta(hours=12)) &
+            (target.index <= d + pd.Timedelta(hours=12))
+        ]
+        if len(window):
+            flood_levels.append(window.max())
+
+    flood_levels = pd.Series(flood_levels)
+    print(flood_levels.describe())
+    print(f"\nsuggested threshold: {flood_levels.min():.1f} cm  (min of known floods)")
 
 
 if __name__ == "__main__":

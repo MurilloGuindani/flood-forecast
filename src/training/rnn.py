@@ -39,16 +39,17 @@ MODELS_DIR   = PROJECT_ROOT / "data" / "models" / "nn"
 PLOTS_DIR    = MODELS_DIR / "plots"
 FEATURES_DIR  = PROJECT_ROOT / "data" / "features"
 HORIZONS   = [1]
-BATCH_SIZE = 512
-EPOCHS     = 5
+BATCH_SIZE = 64
+EPOCHS     = 100
 SEED       = 42
 
 # Hyper-parameter grid — searched on VAL set
 PARAM_GRID = {
-    "hidden_size": [64, 128, 256],
+    "hidden_size": [4, 8, 16, 64],
     "num_layers":  [1, 2, 4],
-    "dropout":     [0.1, 0.15],
-    "lr":          [1e-2, 1e-3, 5e-4],
+    "dropout":     [0.1, 0.2, 0.3, 0.5],
+    "lr": [1e-3, 5e-4, 1e-4],
+    "weight_decay": [0.0, 1e-4, 1e-3],
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,6 +197,9 @@ class TideLSTM(nn.Module):
             nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
             nn.Linear(hidden_size // 2, output_size),
+        ) if hidden_size >= 128 else nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, output_size),
         )
 
     def forward(self, x):
@@ -215,6 +219,9 @@ class TideGRU(nn.Module):
             nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
             nn.Linear(hidden_size // 2, output_size),
+        ) if hidden_size >= 128 else nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, output_size),
         )
 
     def forward(self, x):
@@ -298,31 +305,44 @@ def grid_search(arch_name, input_size, train_ds, val_ds, device):
     criterion    = nn.MSELoss()
 
     print(f"\n  Grid search: {total} configs")
-    print(f"  {'config':>6}  {'hidden':>6}  {'layers':>6}  {'drop':>5}  {'lr':>7}  val_mse")
+    print(f"  {'config':>6}  {'hidden':>6}  {'layers':>6}  {'drop':>5}  {'lr':>7}  {'l2':>7}  val_mse")
     print(f"  {'─'*60}")
 
     for idx, values in enumerate(combos, 1):
         params = dict(zip(keys, values))
         model  = MODEL_CLS[arch_name](input_size, **{k: v for k, v in params.items()
-                                                     if k != "lr"}).to(device)
-        opt    = torch.optim.Adam(model.parameters(), lr=params["lr"])
-        sched  = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=4, factor=0.5)
+                                                    if k not in ("lr", "weight_decay")}).to(device)
+        opt    = torch.optim.Adam(
+            model.parameters(),
+            lr=params["lr"],
+            weight_decay=params.get("weight_decay", 0.0),
+        )
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS, eta_min=1e-5)
         t_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
         v_loader = DataLoader(val_ds,   batch_size=BATCH_SIZE)
 
         best_e_mse, best_e_state = float("inf"), None
+        patience_counter = 0
+        EARLY_STOP_PATIENCE = 15
+
         for _ in range(EPOCHS):
             train_epoch(model, t_loader, opt, criterion, device)
             v = eval_mse(model, v_loader, criterion, device)
-            sched.step(v)
+            sched.step()
             if v < best_e_mse:
-                best_e_mse   = v
-                best_e_state = {k: v_.clone() for k, v_ in model.state_dict().items()}
+                best_e_mse      = v
+                best_e_state    = {k: v_.clone() for k, v_ in model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= EARLY_STOP_PATIENCE:
+                    break
 
         marker = " ◄ best" if best_e_mse < best_val_mse else ""
         print(f"  {idx:>6}  {params['hidden_size']:>6}  {params['num_layers']:>6}  "
-              f"{params['dropout']:>5.2f}  {params['lr']:>7.0e}  "
-              f"{best_e_mse:.4f}{marker}")
+            f"{params['dropout']:>5.2f}  {params['lr']:>7.0e}  "
+            f"{params.get('weight_decay', 0.0):>7.0e}  "
+            f"{best_e_mse:.4f}{marker}")
 
         if best_e_mse < best_val_mse:
             best_val_mse = best_e_mse
@@ -337,11 +357,13 @@ def grid_search(arch_name, input_size, train_ds, val_ds, device):
 
 def train_best(arch_name, input_size, best_params, train_ds, val_ds, device):
     """Re-train with best params, tracking curve, return (model, train_losses, val_losses)."""
-    model     = MODEL_CLS[arch_name](input_size,
-                                     **{k: v for k, v in best_params.items()
-                                        if k != "lr"}).to(device)
+    model = MODEL_CLS[arch_name](
+                input_size,
+                **{k: v for k, v in best_params.items() if k not in ("lr", "weight_decay")}
+            ).to(device)
     opt       = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
-    sched     = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=5, factor=0.5)
+
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS, eta_min=1e-5)
     criterion = nn.MSELoss()
     t_loader  = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
     v_loader  = DataLoader(val_ds,   batch_size=BATCH_SIZE)
@@ -352,13 +374,18 @@ def train_best(arch_name, input_size, best_params, train_ds, val_ds, device):
     for epoch in range(1, EPOCHS + 1):
         tr  = train_epoch(model, t_loader, opt, criterion, device)
         val = eval_mse(model, v_loader, criterion, device)
-        sched.step(val)
+        sched.step()
         tr_losses.append(tr)
         val_losses.append(val)
 
         if val < best_val:
-            best_val   = val
+            best_val = val
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= 15:
+                break
 
         if epoch % 10 == 0 or epoch == 1:
             lr_now = opt.param_groups[0]["lr"]
@@ -534,12 +561,12 @@ def main():
 
     all_metrics = []
 
-    # if args.model in ("mlp", "both"):
-    #     run("MLP",  input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler)
+    if args.model in ("mlp", "both"):
+        run("MLP",  input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler)
     if args.model in ("lstm", "both"):
         run("LSTM", input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler)
-    # if args.model in ("gru", "both"):
-    #     run("GRU",  input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler)
+    if args.model in ("gru", "both"):
+        run("GRU",  input_size, train_ds, val_ds, test_ds, device, all_metrics, y_scaler)
 
 
     # Save metrics
