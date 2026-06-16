@@ -7,6 +7,7 @@ Produces two artifacts:
 
 Input features:
   - Astronomical tide (known future at inference)
+  - Observed tide level (last hour + lags/rolling stats)  <-- NEW
   - Weather: pressure, wind U/V from coastal stations
   - Cyclical time encodings
 
@@ -55,7 +56,6 @@ FLOOD_EVENTS = ['29/07/2025',
                 '17/01/2025']
 
 
-
 # Lookback window for sequence models (hours)
 LOOKBACK_H    = 72
 
@@ -64,6 +64,9 @@ HORIZONS      = [1]
 
 # Lag steps for flat features
 LAG_STEPS     = [1, 2, 3, 6, 12, 24, 48, 72]
+
+# Lag steps for the observed tide level itself (target's own history)
+TIDE_LAG_STEPS = [1, 2, 3, 6, 12, 24, 48, 72]
 
 # Rolling windows for flat features
 ROLL_WINDOWS  = [3, 6, 12, 24, 48, 72]
@@ -298,6 +301,51 @@ def tide_features(index: pd.DatetimeIndex) -> pd.DataFrame:
     return out
 
 
+# ── Observed tide level features (NEW) ───────────────────────────────────────
+
+def observed_tide_features(index: pd.DatetimeIndex, target: pd.Series) -> pd.DataFrame:
+    """
+    Features derived from the observed tide level itself (the same series
+    used as the prediction target).
+
+    All values are strictly backward-looking (lag >= 1h relative to t), so
+    they are safe to use as model inputs without leaking future information
+    into target_t+{h}h, which is built from target.shift(-h) downstream.
+    """
+    out = pd.DataFrame(index=index)
+    obs = target.reindex(index)
+
+    # "Last hour" tide level == lag 1h. Most recent observed value.
+    out["tide_obs_lag1h"] = obs.shift(1)
+
+    # Short-term dynamics of the observed series
+    out["tide_obs_velocity_cm_h"] = obs.shift(1).diff(1)   # change between t-2h and t-1h
+    out["tide_obs_accel_cm_h2"]   = out["tide_obs_velocity_cm_h"].diff(1)
+
+    # Additional lags
+    for lag in TIDE_LAG_STEPS:
+        if lag == 1:
+            continue  # already added as tide_obs_lag1h
+        out[f"tide_obs_lag{lag}h"] = obs.shift(lag)
+
+    # Rolling stats computed on lag-1 series (so window [t-1, t-window] only)
+    obs_lag1 = obs.shift(1)
+    for window in ROLL_WINDOWS:
+        out[f"tide_obs_roll{window}h_mean"] = obs_lag1.rolling(window, min_periods=1).mean()
+        out[f"tide_obs_roll{window}h_std"]  = obs_lag1.rolling(window, min_periods=1).std()
+        out[f"tide_obs_roll{window}h_min"]  = obs_lag1.rolling(window, min_periods=1).min()
+        out[f"tide_obs_roll{window}h_max"]  = obs_lag1.rolling(window, min_periods=1).max()
+
+    # Anomaly vs astronomical tide (storm surge proxy), if astro available
+    if TIDE_HOURLY.exists():
+        astro = (pd.read_parquet(TIDE_HOURLY)
+                 .set_index("datetime")["tide_cm"]
+                 .reindex(index, method="nearest", tolerance="30min"))
+        out["tide_obs_minus_astro_lag1h"] = obs.shift(1) - astro.shift(1)
+
+    return out
+
+
 # ── Weather features ──────────────────────────────────────────────────────────
 
 def load_station(path: Path, index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -401,6 +449,7 @@ def weather_features(index: pd.DatetimeIndex, cleaned_dir: Path) -> pd.DataFrame
 def assemble_flat(index: pd.DatetimeIndex, target: pd.Series,
                   cleaned_dir: Path) -> pd.DataFrame:
     feat = tide_features(index)
+    # feat = feat.join(observed_tide_features(index, target))
     feat = feat.join(weather_features(index, cleaned_dir))
 
     # Targets
@@ -681,6 +730,8 @@ def main() -> None:
     )
     print(f"[saved] ml_features_sequence_te.npz")
     print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}")
+
+
     flood_dates = pd.to_datetime(FLOOD_EVENTS, format="%d/%m/%Y")
 
     # get observed tide at each flood event
@@ -689,8 +740,8 @@ def main() -> None:
     for d in flood_dates:
         # get max tide in ±12h window around the event
         window = target[
-            (target.index >= d - pd.Timedelta(hours=12)) &
-            (target.index <= d + pd.Timedelta(hours=12))
+            (target.index >= d - pd.Timedelta(hours=6)) &
+            (target.index <= d + pd.Timedelta(hours=6))
         ]
         if len(window):
             flood_levels.append(window.max())

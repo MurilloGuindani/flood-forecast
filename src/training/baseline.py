@@ -23,33 +23,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import ParameterGrid
 from xgboost import XGBRegressor
 
-# ── Config ────────────────────────────────────────────────────────────────────
-PROJECT_ROOT  = Path(__file__).resolve().parents[2]
-FEATURES_DIR  = PROJECT_ROOT / "data" / "features"
-MODELS_DIR    = PROJECT_ROOT / "data" / "models"
-PLOTS_DIR     = MODELS_DIR / "plots"
 
-HORIZONS      = [1]
-
-XGB_GRID = {
-    "n_estimators":     [300, 600],
-    "max_depth":        [4, 6, 8],
-    "learning_rate":    [0.05, 0.1],
-    "subsample":        [0.7, 0.8],
-    "colsample_bytree": [0.7, 0.8],
-    "reg_alpha":        [0.0, 0.1, 1.0],   # L1
-    "reg_lambda":       [1.0, 5.0, 10.0],  # L2
-}
-
-RF_GRID = {
-    "n_estimators": [200, 400],
-    "max_depth":    [10, 20, None],
-    "max_features": [0.5, "sqrt"],
-    "min_samples_leaf": [1, 5, 10],  # implicit regularization
-    "max_samples":      [0.7, 0.9],  # bagging fraction
-}
-# ─────────────────────────────────────────────────────────────────────────────
-
+from config import *
 
 def load_splits() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     train = pd.read_parquet(FEATURES_DIR / "split_train.parquet")

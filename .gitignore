@@ -8,7 +8,10 @@ data/*
 # pdf files
 *.pdf
 
-
+*.png
+*.json
+*.pt
+*.txt
 /data/*
 # Byte-compiled / optimized / DLL files
 __pycache__/
