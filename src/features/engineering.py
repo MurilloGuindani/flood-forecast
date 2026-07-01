@@ -14,7 +14,8 @@ Input features:
 Targets: observed tide at t+1h, t+6h, t+24h
 """
 
-# claude-sonnet-4-20250514 & GPT 5.5
+
+# claude-sonnet-4-6 (autoregressive astro_future addition)
 
 from __future__ import annotations
 from pathlib import Path
@@ -38,35 +39,39 @@ FEATURES_DIR  = PROJECT_ROOT / "data" / "features"
 
 TARGET_STATION_GLOB = "2951_*.parquet"
 TIDE_HOURLY         = CLEANED_DIR / "tide_with_reconstructed_sun.parquet"
-# TIDE_HOURLY         = CLEANED_DIR / "tide_with_reconstructed_sun.parquet"
 TIDE_RESIDUAL       = CLEANED_DIR / "tide_residual.parquet"
-FLOOD_EVENTS = ['29/07/2025',
-                '29/01/2025',
-                #'29/12/2025',
-                '29/04/2025',
-                # '11/05/2026',
-                '14/03/2025',
-                #'24/06/2025',
-                #'29/05/2025',
-                '04/01/2026',
-                #'30/03/2025',
-                '28/04/2025',
-                #'16/01/2025',
-                #'11/12/2025',
-                '17/01/2025']
-
+FLOOD_EVENTS =[
+            "15/05/2026",
+            "11/05/2026",
+            "04/01/2026",
+            "29/12/2025",
+            "11/12/2025",
+            "29/07/2025",
+            "24/06/2025",
+            "29/05/2025",
+            "29/04/2025",
+            "28/04/2025",
+            "30/03/2025",
+            "14/03/2025",
+            "29/01/2025",
+            "29/01/2025",
+            "17/01/2025",
+            "16/01/2025",
+            "25/05/2024",
+            "15/04/2024",
+        ]
 
 # Lookback window for sequence models (hours)
 LOOKBACK_H    = 72
 
 # Forecast horizons (hours ahead)
-HORIZONS      = [1]
+HORIZONS      = [1,2,3,4,5,6,7,8,9,10,11,12]
 
 # Lag steps for flat features
-LAG_STEPS     = [1, 2, 3, 6, 12, 24, 48, 72]
+LAG_STEPS     = [1, 2, 3, 4, 5, 6, 12, 24, 48, 72]
 
 # Lag steps for the observed tide level itself (target's own history)
-TIDE_LAG_STEPS = [1, 2, 3, 6, 12, 24, 48, 72]
+TIDE_LAG_STEPS = [1, 2, 3, 4, 5, 6, 12, 24, 48, 72]
 
 # Rolling windows for flat features
 ROLL_WINDOWS  = [3, 6, 12, 24, 48, 72]
@@ -106,23 +111,6 @@ def remove_redundant_features(
 ) -> Tuple[pd.DataFrame, Dict[str, List[str]]]:
     """
     Remove redundant features and return a report explaining why.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe.
-    std_threshold : float
-        Features with std < threshold are removed.
-    corr_threshold : float
-        One feature from each pair with abs(corr) > threshold is removed.
-    missing_threshold : float
-        Features with missing fraction > threshold are removed.
-
-    Returns
-    -------
-    filtered_df : pd.DataFrame
-    report : dict
-        Dictionary containing removed features by criterion.
     """
 
     X = df.copy()
@@ -135,102 +123,66 @@ def remove_redundant_features(
         "high_correlation": [],
     }
 
-    # ------------------------------------------------------------------
     # 1. Constant features
-    # ------------------------------------------------------------------
     constant_cols = [
         c for c in X.columns
         if X[c].nunique(dropna=False) <= 1
     ]
-
     report["constant_features"] = constant_cols
     X = X.drop(columns=constant_cols)
 
-    # ------------------------------------------------------------------
     # 2. Near-zero variance (numeric only)
-    # ------------------------------------------------------------------
     numeric_cols = X.select_dtypes(include=np.number).columns
-
     low_var_cols = [
         c for c in numeric_cols
         if X[c].std(skipna=True) < std_threshold
     ]
-
     report["near_zero_variance"] = low_var_cols
     X = X.drop(columns=low_var_cols)
 
-    # ------------------------------------------------------------------
     # 3. High missingness
-    # ------------------------------------------------------------------
     missing_cols = [
         c for c in X.columns
         if X[c].isna().mean() > missing_threshold
     ]
-
     report["high_missingness"] = missing_cols
     X = X.drop(columns=missing_cols)
 
-    # ------------------------------------------------------------------
     # 4. Duplicate columns
-    # ------------------------------------------------------------------
     duplicate_cols = []
-
     cols = list(X.columns)
-
     for i in range(len(cols)):
         col_i = cols[i]
-
         if col_i in duplicate_cols:
             continue
-
         for j in range(i + 1, len(cols)):
             col_j = cols[j]
-
             if X[col_i].equals(X[col_j]):
                 duplicate_cols.append(col_j)
-
     report["duplicate_columns"] = duplicate_cols
     X = X.drop(columns=duplicate_cols)
-    # ------------------------------------------------------------------
+
     # 5. High correlation
-    # Keep first feature, remove later ones.
-    # ------------------------------------------------------------------
-
     numeric_cols = X.select_dtypes(include=np.number).columns
-
     corr_matrix = X[numeric_cols].corr().abs()
-
     upper = corr_matrix.where(
         np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
     )
 
     corr_remove = []
     corr_report = []
-
     for col in upper.columns:
-
         correlated_with = upper.index[upper[col] > corr_threshold]
-
         if len(correlated_with) > 0:
-
             kept_col = correlated_with[0]
-
-            corr_value = float(
-                upper.loc[kept_col, col]
-            )
-
+            corr_value = float(upper.loc[kept_col, col])
             corr_remove.append(col)
-
-            corr_report.append(
-                {
-                    "removed": col,
-                    "kept": kept_col,
-                    "correlation": round(corr_value, 4),
-                }
-            )
-
+            corr_report.append({
+                "removed": col,
+                "kept": kept_col,
+                "correlation": round(corr_value, 4),
+            })
     report["high_correlation"] = corr_report
-
     X = X.drop(columns=corr_remove)
 
     return X, report
@@ -301,7 +253,7 @@ def tide_features(index: pd.DatetimeIndex) -> pd.DataFrame:
     return out
 
 
-# ── Observed tide level features (NEW) ───────────────────────────────────────
+# ── Observed tide level features ─────────────────────────────────────────────
 
 def observed_tide_features(index: pd.DatetimeIndex, target: pd.Series) -> pd.DataFrame:
     """
@@ -315,20 +267,15 @@ def observed_tide_features(index: pd.DatetimeIndex, target: pd.Series) -> pd.Dat
     out = pd.DataFrame(index=index)
     obs = target.reindex(index)
 
-    # "Last hour" tide level == lag 1h. Most recent observed value.
     out["tide_obs_lag1h"] = obs.shift(1)
-
-    # Short-term dynamics of the observed series
-    out["tide_obs_velocity_cm_h"] = obs.shift(1).diff(1)   # change between t-2h and t-1h
+    out["tide_obs_velocity_cm_h"] = obs.shift(1).diff(1)
     out["tide_obs_accel_cm_h2"]   = out["tide_obs_velocity_cm_h"].diff(1)
 
-    # Additional lags
     for lag in TIDE_LAG_STEPS:
         if lag == 1:
-            continue  # already added as tide_obs_lag1h
+            continue
         out[f"tide_obs_lag{lag}h"] = obs.shift(lag)
 
-    # Rolling stats computed on lag-1 series (so window [t-1, t-window] only)
     obs_lag1 = obs.shift(1)
     for window in ROLL_WINDOWS:
         out[f"tide_obs_roll{window}h_mean"] = obs_lag1.rolling(window, min_periods=1).mean()
@@ -336,7 +283,6 @@ def observed_tide_features(index: pd.DatetimeIndex, target: pd.Series) -> pd.Dat
         out[f"tide_obs_roll{window}h_min"]  = obs_lag1.rolling(window, min_periods=1).min()
         out[f"tide_obs_roll{window}h_max"]  = obs_lag1.rolling(window, min_periods=1).max()
 
-    # Anomaly vs astronomical tide (storm surge proxy), if astro available
     if TIDE_HOURLY.exists():
         astro = (pd.read_parquet(TIDE_HOURLY)
                  .set_index("datetime")["tide_cm"]
@@ -428,7 +374,6 @@ def weather_features(index: pd.DatetimeIndex, cleaned_dir: Path) -> pd.DataFrame
         wv = pd.concat(all_wind_v, axis=1)
         out["spatial__wind_u_mean"] = wu.mean(axis=1)
         out["spatial__wind_v_mean"] = wv.mean(axis=1)
-        # South wind index: positive = southerly wind, primary surge driver
         out["spatial__south_wind_index"] = out["spatial__wind_v_mean"].clip(lower=0)
         for lag in LAG_STEPS:
             out[f"spatial__wind_u_lag{lag}h"] = out["spatial__wind_u_mean"].shift(lag)
@@ -449,10 +394,9 @@ def weather_features(index: pd.DatetimeIndex, cleaned_dir: Path) -> pd.DataFrame
 def assemble_flat(index: pd.DatetimeIndex, target: pd.Series,
                   cleaned_dir: Path) -> pd.DataFrame:
     feat = tide_features(index)
-    # feat = feat.join(observed_tide_features(index, target))
+    feat = feat.join(observed_tide_features(index, target))
     feat = feat.join(weather_features(index, cleaned_dir))
 
-    # Targets
     target_reindexed = target.reindex(index)
     for h in HORIZONS:
         feat[f"target_t+{h}h"] = target_reindexed.shift(-h)
@@ -469,12 +413,16 @@ def assemble_flat(index: pd.DatetimeIndex, target: pd.Series,
 
 def build_sequences(flat: pd.DataFrame) -> dict:
     """
-    Sliding window → (N, LOOKBACK_H, F) input tensor, (N, 3) target tensor.
+    Sliding window → (N, LOOKBACK_H, F) input tensor, (N, H) target tensor.
 
-    X[i] = features for hours [i, i+LOOKBACK_H)
-    y[i] = [tide at t+1h, t+6h, t+24h] for the prediction point i+LOOKBACK_H
+    X[i]            = features for hours [i, i+LOOKBACK_H)
+    y[i]            = [tide at t+1h, ..., t+Hh] for the prediction point i+LOOKBACK_H
+    astro_future[i] = known astronomical tide at t+1h..t+Hh (decoder input for
+                      autoregressive / seq2seq models — available at inference
+                      time, not derived from the target)
     """
-    target_cols  = [f"target_t+{h}h" for h in HORIZONS]
+    target_cols        = [f"target_t+{h}h" for h in HORIZONS]
+    astro_future_cols  = [f"tide_astro_t+{h}h" for h in HORIZONS]
     feature_cols = [c for c in flat.columns
                     if c != "datetime" and c not in target_cols
                     and ('roll' not in c or 'roll1h' in c)
@@ -482,21 +430,33 @@ def build_sequences(flat: pd.DataFrame) -> dict:
 
     print(feature_cols)
 
-    flat_clean   = flat.dropna(subset=feature_cols).reset_index(drop=True)
-    feat_arr     = flat_clean[feature_cols].values.astype(np.float32)
-    target_arr   = flat_clean[target_cols].values.astype(np.float32)
-    times        = flat_clean["datetime"].values
+    missing_astro = [c for c in astro_future_cols if c not in flat.columns]
+    if missing_astro:
+        raise ValueError(f"Missing astro future columns: {missing_astro}")
+
+    required_cols = set(feature_cols) | set(astro_future_cols)
+    flat_clean    = flat.dropna(subset=list(required_cols)).reset_index(drop=True)
+
+    feat_arr         = flat_clean[feature_cols].values.astype(np.float32)
+    target_arr       = flat_clean[target_cols].values.astype(np.float32)
+    astro_future_arr = flat_clean[astro_future_cols].values.astype(np.float32)
+    times            = flat_clean["datetime"].values
 
     N = len(flat_clean) - LOOKBACK_H
     if N <= 0:
         raise ValueError(f"Not enough rows ({len(flat_clean)}) for lookback {LOOKBACK_H}h")
 
-    X = np.stack([feat_arr[i: i + LOOKBACK_H] for i in range(N)])
-    y = target_arr[LOOKBACK_H:]
-    t = times[LOOKBACK_H:]
+    X            = np.stack([feat_arr[i: i + LOOKBACK_H] for i in range(N)])
+    y            = target_arr[LOOKBACK_H:]
+    astro_future = astro_future_arr[LOOKBACK_H:]
+    t            = times[LOOKBACK_H:]
 
-    print(f"[sequence] X: {X.shape}  y: {y.shape}  features: {len(feature_cols)}")
-    return {"X": X, "y": y, "times": t, "feature_names": np.array(feature_cols)}
+    print(f"[sequence] X: {X.shape}  y: {y.shape}  "
+          f"astro_future: {astro_future.shape}  features: {len(feature_cols)}")
+    return {
+        "X": X, "y": y, "astro_future": astro_future,
+        "times": t, "feature_names": np.array(feature_cols),
+    }
 
 
 def split_dataset(flat: pd.DataFrame,
@@ -508,9 +468,6 @@ def split_dataset(flat: pd.DataFrame,
       - 2024: all goes to train (reconstructed sun tide)
       - 2025+2026: randomly sampled into train/val/test
                    preserving temporal blocks to avoid leakage
-
-    Sampling is block-based (weekly blocks) to preserve
-    short-term autocorrelation within each split.
     """
     rng = np.random.default_rng(random_state)
 
@@ -519,7 +476,6 @@ def split_dataset(flat: pd.DataFrame,
 
     train_2024 = df[df["datetime"].dt.year == 2024].copy()
     rest       = df[df["datetime"].dt.year >= 2025].copy()
-    # Convert flood dates to week block ids
     flood_dates = pd.to_datetime(FLOOD_EVENTS, format="%d/%m/%Y")
 
     flood_blocks = set(
@@ -527,7 +483,6 @@ def split_dataset(flat: pd.DataFrame,
             lambda d: f"{d.isocalendar().year}_{d.isocalendar().week:02d}"
         )
     )
-    # ── Block sampling on rest (weekly blocks) ────────────────────────────────
     rest["_week_block"] = (
         rest["datetime"].dt.isocalendar().year.astype(str) + "_" +
         rest["datetime"].dt.isocalendar().week.astype(str).str.zfill(2)
@@ -535,7 +490,6 @@ def split_dataset(flat: pd.DataFrame,
     blocks = rest["_week_block"].unique()
     rng.shuffle(blocks)
 
-    # Remove flood blocks from random allocation
     available_blocks = [b for b in blocks if b not in flood_blocks]
 
     n_val = int(len(blocks) * val_ratio)
@@ -545,9 +499,7 @@ def split_dataset(flat: pd.DataFrame,
     test_blocks = set(available_blocks[n_val:n_val + n_test])
     train_blocks = set(available_blocks[n_val + n_test:])
 
-    # Force flood weeks into test
     test_blocks.update(flood_blocks)
-    # Safety: ensure flood weeks are not elsewhere
     train_blocks.difference_update(flood_blocks)
     val_blocks.difference_update(flood_blocks)
 
@@ -557,7 +509,6 @@ def split_dataset(flat: pd.DataFrame,
 
     train = pd.concat([train_2024, rest_train], ignore_index=True)
 
-    # Drop helper column
     for d in [train, val, test]:
         d.drop(columns=["_week_block"], inplace=True, errors="ignore")
 
@@ -565,7 +516,6 @@ def split_dataset(flat: pd.DataFrame,
     val   = val.sort_values("datetime").reset_index(drop=True)
     test  = test.sort_values("datetime").reset_index(drop=True)
 
-    # ── Stats check ───────────────────────────────────────────────────────────
     print("\n[split summary]")
     for name, d in [("train", train), ("val", val), ("test", test)]:
         months = sorted(d["datetime"].dt.month.unique())
@@ -579,10 +529,9 @@ def split_dataset(flat: pd.DataFrame,
 
 
 def build_and_split(flat: pd.DataFrame, val_ratio=0.20, test_ratio=0.10):
-    # Sort first — critical
     flat = flat.sort_values("datetime").reset_index(drop=True)
 
-    seq = build_sequences(flat)  # build on full contiguous data
+    seq = build_sequences(flat)
     X, y, times = seq["X"], seq["y"], seq["times"]
 
     N = len(X)
@@ -605,25 +554,45 @@ def split_chronological(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Chronological train/val/test split.
-    Flood event blocks (±block_days window) are always forced into test.
+    Flood event blocks are distributed round-robin across train/val/test
+    so every set contains flood examples, with no overlap between sets.
     """
     flat = flat.sort_values("datetime").reset_index(drop=True)
 
     flood_dates = pd.to_datetime(flood_events, format="%d/%m/%Y")
 
-    # Block ID: days since epoch // block_days
     flat["_block"] = (
         flat["datetime"].dt.floor("D").astype(np.int64) // (86400 * 1e9 * block_days)
     ).astype(int)
 
-    flood_blocks = set()
-    for d in flood_dates:
-        block_id = int(pd.Timestamp(d).floor("D").value // (86400 * 1e9 * block_days))
-        flood_blocks.add(block_id)
+    flood_blocks = sorted({
+        int(pd.Timestamp(d).floor("D").value // (86400 * 1e9 * block_days))
+        for d in flood_dates
+    })
 
     flood_mask = flat["_block"].isin(flood_blocks)
     flood_df   = flat[flood_mask].copy()
     rest_df    = flat[~flood_mask].copy().reset_index(drop=True)
+
+    # round-robin assignment of flood blocks → train/val/test by ratio
+    targets = (["train"] * round(val_ratio * 0 + 1)  # placeholder, replaced below
+               )
+    # build weighted cycle e.g. train,train,train,val,test,train,...
+    weights = {"train": 1 - val_ratio - test_ratio, "val": val_ratio, "test": test_ratio}
+    order = sorted(weights, key=lambda k: -weights[k])
+    cycle = []
+    acc = {k: 0.0 for k in weights}
+    for _ in flood_blocks:
+        acc = {k: acc[k] + weights[k] for k in weights}
+        pick = max(acc, key=acc.get)
+        acc[pick] -= 1.0
+        cycle.append(pick)
+
+    block_assignment = dict(zip(flood_blocks, cycle))
+
+    flood_train = flood_df[flood_df["_block"].map(block_assignment) == "train"]
+    flood_val   = flood_df[flood_df["_block"].map(block_assignment) == "val"]
+    flood_test  = flood_df[flood_df["_block"].map(block_assignment) == "test"]
 
     N       = len(rest_df)
     n_test  = int(N * test_ratio)
@@ -632,17 +601,19 @@ def split_chronological(
 
     train = rest_df.iloc[:n_train].drop(columns=["_block"])
     val   = rest_df.iloc[n_train:n_train + n_val].drop(columns=["_block"])
-    test  = (
-        pd.concat([rest_df.iloc[n_train + n_val:], flood_df])
-        .sort_values("datetime")
-        .reset_index(drop=True)
-        .drop(columns=["_block"])
-    )
+    test  = rest_df.iloc[n_train + n_val:].drop(columns=["_block"])
 
+    train = pd.concat([train, flood_train.drop(columns=["_block"])]).sort_values("datetime").reset_index(drop=True)
+    val   = pd.concat([val, flood_val.drop(columns=["_block"])]).sort_values("datetime").reset_index(drop=True)
+    test  = pd.concat([test, flood_test.drop(columns=["_block"])]).sort_values("datetime").reset_index(drop=True)
+
+    split_of_block = {**block_assignment}
     for d in flood_dates:
-        in_test = (pd.to_datetime(test["datetime"]).dt.date == d.date()).any()
-        print(f"  flood {d.date()} → {'test ✓' if in_test else 'MISSING ✗'}")
-
+        b = int(pd.Timestamp(d).floor("D").value // (86400 * 1e9 * block_days))
+        print(f"  flood {d.date()} → {split_of_block[b]}")
+    print(f"  train floods: {sorted(d.date() for d in flood_dates if split_of_block[int(pd.Timestamp(d).floor('D').value // (86400 * 1e9 * block_days))] == 'train')}")
+    print(f"  val floods:   {sorted(d.date() for d in flood_dates if split_of_block[int(pd.Timestamp(d).floor('D').value // (86400 * 1e9 * block_days))] == 'val')}")
+    print(f"  test floods:  {sorted(d.date() for d in flood_dates if split_of_block[int(pd.Timestamp(d).floor('D').value // (86400 * 1e9 * block_days))] == 'test')}")
     print(f"\n[split] train={len(train)}  val={len(val)}  test={len(test)}")
     return train, val, test
 
@@ -655,19 +626,18 @@ def main() -> None:
     target = load_target(CLEANED_DIR)
     index  = build_index(target)
 
-    # ── Flat ──────────────────────────────────────────────────────────────────
     print("\n── Flat feature set ──")
     flat = assemble_flat(index, target, CLEANED_DIR)
 
     target_cols  = [f"target_t+{h}h" for h in HORIZONS]
-    feature_cols = [c for c in flat.columns
+    feature_cols_ = [c for c in flat.columns
                     if c != "datetime" and c not in target_cols]
 
-    missing   = flat[feature_cols].isna().mean()
+    missing   = flat[feature_cols_].isna().mean()
     drop_cols = missing[missing > 0.4].index.tolist()
     flat      = flat.drop(columns=drop_cols)
 
-    fill_cols = [c for c in feature_cols if c not in drop_cols]
+    fill_cols = [c for c in feature_cols_ if c not in drop_cols]
     flat[fill_cols] = flat[fill_cols].fillna(
         flat[fill_cols].rolling(window=4, min_periods=1).mean()
     )
@@ -696,49 +666,25 @@ def main() -> None:
     test.to_parquet(FEATURES_DIR / "split_test.parquet",   index=False)
     print("[saved] split_train / split_val / split_test")
 
-    # ── Sequence ──────────────────────────────────────────────────────────────
     print("\n── Sequence tensors ──")
-    seq = build_sequences(train)
-    np.savez_compressed(
-        FEATURES_DIR / "ml_features_sequence_tr.npz",
-        X=seq["X"],
-        y=seq["y"],
-        times=seq["times"].astype(str),
-        feature_names=seq["feature_names"],
-    )
-    print(f"[saved] ml_features_sequence_tr.npz")
-    print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}")
-
-    seq = build_sequences(val)
-    np.savez_compressed(
-        FEATURES_DIR / "ml_features_sequence_val.npz",
-        X=seq["X"],
-        y=seq["y"],
-        times=seq["times"].astype(str),
-        feature_names=seq["feature_names"],
-    )
-    print(f"[saved] ml_features_sequence_val.npz")
-    print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}")
-
-    seq = build_sequences(test)
-    np.savez_compressed(
-        FEATURES_DIR / "ml_features_sequence_te.npz",
-        X=seq["X"],
-        y=seq["y"],
-        times=seq["times"].astype(str),
-        feature_names=seq["feature_names"],
-    )
-    print(f"[saved] ml_features_sequence_te.npz")
-    print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}")
-
+    for name, df in [("tr", train), ("val", val), ("te", test)]:
+        seq = build_sequences(df)
+        np.savez_compressed(
+            FEATURES_DIR / f"ml_features_sequence_{name}.npz",
+            X=seq["X"],
+            y=seq["y"],
+            astro_future=seq["astro_future"],
+            times=seq["times"].astype(str),
+            feature_names=seq["feature_names"],
+        )
+        print(f"[saved] ml_features_sequence_{name}.npz")
+        print(f"\n[done]  X={seq['X'].shape}  y={seq['y'].shape}  astro_future={seq['astro_future'].shape}")
 
     flood_dates = pd.to_datetime(FLOOD_EVENTS, format="%d/%m/%Y")
 
-    # get observed tide at each flood event
     target = load_target(CLEANED_DIR)
     flood_levels = []
     for d in flood_dates:
-        # get max tide in ±12h window around the event
         window = target[
             (target.index >= d - pd.Timedelta(hours=6)) &
             (target.index <= d + pd.Timedelta(hours=6))

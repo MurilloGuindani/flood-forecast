@@ -235,3 +235,5 @@ __marimo__/
 # Data files
 *parquet
 *csv
+
+/old_relports/*
